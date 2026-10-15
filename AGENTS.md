@@ -18,7 +18,7 @@ This repository is intended to be safe to publish later. Keep sample content fic
 
 - Inspect the existing code on the coding VPS. Inspect containers, networks, proxy/tunnel setup, and port conflicts on the AI server before changing its services. Never infer AI server state from the coding VPS.
 - Use a feature branch for substantive changes and present a diff for review. Do not force-push or overwrite existing containers, volumes, DNS records, or production data.
-- Use the repository owner's configured Git identity associated with `iamjor` for every commit. Before committing, check the effective `git config user.name` and `git config user.email`; stop if either value is missing or does not match the owner identity. Never use Codex as the author or committer, and do not add a `Co-authored-by: Codex` trailer.
+- Use the repository owner's configured Git identity associated with `iamjor` for every commit. Before committing, check the effective `git config user.name` and `git config user.email`; stop if either value is missing or does not match the owner identity. Before pushing, inspect every commit in `origin/main..HEAD` and stop unless each author and committer matches that identity. Never use Codex as the author or committer, and do not add a `Co-authored-by: Codex` trailer.
 - Keep `.env`, database files, exports and real media out of Git. Ask the owner to enter credentials locally; never print secrets in logs or commit them.
 - Preserve existing user data. Back up the SQLite volume before schema changes or deployments that could affect it.
 - Run focused checks: `node --check dist/app.js`, `node --check dist/seed.js`, `python3 -m py_compile server.py`, API auth/read/write/conflict tests, then Docker build and an HTTP health check on the AI server.
