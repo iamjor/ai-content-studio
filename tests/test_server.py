@@ -18,8 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ServerIntegrationTests(unittest.TestCase):
+    """Exercise authentication, persistence, health, and conflict behavior."""
+
     @classmethod
     def setUpClass(cls):
+        """Start one isolated server and wait until its health route responds."""
         cls.temp_dir = tempfile.TemporaryDirectory(prefix="aics-test-")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
@@ -59,11 +62,13 @@ class ServerIntegrationTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        """Stop the server process and remove its temporary database directory."""
         cls.stop_server()
         cls.temp_dir.cleanup()
 
     @classmethod
     def stop_server(cls):
+        """Stop the server process, escalating to a kill only after timeout."""
         if cls.process.poll() is None:
             cls.process.terminate()
             try:
@@ -74,6 +79,7 @@ class ServerIntegrationTests(unittest.TestCase):
 
     @classmethod
     def request(cls, path, method="GET", payload=None, authenticated=True):
+        """Send a request with optional JSON data and test authentication."""
         headers = {"Authorization": cls.authorization} if authenticated else {}
         body = None
         if payload is not None:
@@ -88,17 +94,20 @@ class ServerIntegrationTests(unittest.TestCase):
         return urllib.request.urlopen(request, timeout=3)
 
     def test_health_check_is_public_and_minimal(self):
+        """Expose a minimal public health response without workspace data."""
         with self.request("/healthz", authenticated=False) as response:
             self.assertEqual(response.status, 200)
             self.assertEqual(json.load(response), {"ok": True})
 
     def test_workspace_requires_authentication(self):
+        """Reject workspace reads that do not provide Basic authentication."""
         with self.assertRaises(urllib.error.HTTPError) as context:
             self.request("/api/workspace", authenticated=False)
         self.assertEqual(context.exception.code, 401)
         self.assertIn("Basic", context.exception.headers["WWW-Authenticate"])
 
     def test_read_write_and_revision_conflict(self):
+        """Persist data and reject a second write with a stale revision."""
         with self.request("/api/workspace") as response:
             initial = json.load(response)
         self.assertEqual(initial, {"revision": 0, "data": None})

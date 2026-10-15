@@ -1,6 +1,12 @@
 # AI Content Studio agent notes
 
-This repository is intended to be safe to publish later. Keep sample content fictional and keep private workspace data, credentials, exports, and server details out of Git.
+This repository is intended to be safe to publish later. Keep sample content fictional and keep private workspace data, credentials, exports, and VPS details out of Git.
+
+## Environments
+
+- The coding VPS hosts VS Code Server and the Codex extension. Use it for source edits, code checks, local builds, and Git operations.
+- The AI server is a separate VPS and is the intended production deployment target. Do not deploy AI Content Studio on the coding VPS or assume its containers, networks, proxy, or free ports match the AI server.
+- Inspect the AI server only after the owner provides an approved access path. Until then, write a deployment plan with explicit assumptions and unresolved checks.
 
 ## App
 
@@ -10,8 +16,7 @@ This repository is intended to be safe to publish later. Keep sample content fic
 
 ## Working rules
 
-- Inspect the existing code, running containers, networks, proxy/tunnel setup, and port conflicts before changing AI server services.
-- Treat development hosts and the production AI server as separate environments. Never infer production containers, networks, proxy settings or port availability from the coding VPS.
+- Inspect the existing code on the coding VPS. Inspect containers, networks, proxy/tunnel setup, and port conflicts on the AI server before changing its services. Never infer AI server state from the coding VPS.
 - Use a feature branch for substantive changes and present a diff for review. Do not force-push or overwrite existing containers, volumes, DNS records, or production data.
 - Keep `.env`, database files, exports and real media out of Git. Ask the owner to enter credentials locally; never print secrets in logs or commit them.
 - Preserve existing user data. Back up the SQLite volume before schema changes or deployments that could affect it.
@@ -19,4 +24,10 @@ This repository is intended to be safe to publish later. Keep sample content fic
 - Do not expose the HTTP port to the public internet. Verify HTTPS and authentication before sharing the URL.
 - Report the deployed URL, container status, data volume name, backup method, migration steps and any remaining limitations.
 - Do not add a public license or change repository visibility without the owner's explicit choice.
-- Do not use em dashes in code comments, UI copy or documentation. En dashes remain acceptable for numeric ranges.
+
+## Writing and code documentation
+
+- Do not use the em dash character (U+2014) in code comments, user-facing copy, documentation, commit messages, or pull request text. Use a comma, colon, period, or ordinary hyphen where appropriate. This rule does not ban the normal hyphen-minus used in code syntax, flags, filenames, or identifiers.
+- Document each meaningful function, class, and feature so another developer can understand its purpose, inputs, outputs, important side effects, and failure behavior. Use Python docstrings for Python functions and classes, and concise JSDoc or nearby comments for JavaScript functions and event handlers.
+- Explain non-obvious business rules, data migration, authentication, persistence, and deployment choices near the relevant code. Avoid comments that merely repeat what a line of code says. Update comments and README when behavior changes.
+- Before declaring a task complete, review changed code for missing or stale documentation and scan changed text for U+2014.
