@@ -18,3 +18,10 @@ This repository is intended to be safe to publish later. Keep sample content fic
 - Do not expose the HTTP port to the public internet. Verify HTTPS and authentication before sharing the URL.
 - Report the deployed URL, container status, data volume name, backup method, migration steps and any remaining limitations.
 - Do not add a public license or change repository visibility without the owner's explicit choice.
+
+## Writing and code documentation
+
+- Do not use the em dash character (U+2014) in code comments, user-facing copy, documentation, commit messages, or pull request text. Use a comma, colon, period, or ordinary hyphen where appropriate. This rule does not ban the normal hyphen-minus used in code syntax, flags, filenames, or identifiers.
+- Document each meaningful function, class, and feature so another developer can understand its purpose, inputs, outputs, important side effects, and failure behavior. Use Python docstrings for Python functions and classes, and concise JSDoc or nearby comments for JavaScript functions and event handlers.
+- Explain non-obvious business rules, data migration, authentication, persistence, and deployment choices near the relevant code. Avoid comments that merely repeat what a line of code says. Update comments and README when behavior changes.
+- Before declaring a task complete, review changed code for missing or stale documentation and scan changed text for U+2014.
