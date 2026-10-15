@@ -2,6 +2,12 @@
 
 This repository is intended to be safe to publish later. Keep sample content fictional and keep private workspace data, credentials, exports, and VPS details out of Git.
 
+## Environments
+
+- The coding VPS hosts VS Code Server and the Codex extension. Use it for source edits, code checks, local builds, and Git operations.
+- The AI server is a separate VPS and is the intended production deployment target. Do not deploy AI Content Studio on the coding VPS or assume its containers, networks, proxy, or free ports match the AI server.
+- Inspect the AI server only after the owner provides an approved access path. Until then, write a deployment plan with explicit assumptions and unresolved checks.
+
 ## App
 
 - Single-owner MVP: static dashboard in `dist/`, Python standard-library HTTP API in `server.py`, SQLite database in a Docker named volume.
@@ -10,7 +16,7 @@ This repository is intended to be safe to publish later. Keep sample content fic
 
 ## Working rules
 
-- Inspect the existing code, running containers, networks, proxy/tunnel setup, and port conflicts before changing VPS services.
+- Inspect the existing code on the coding VPS. Inspect containers, networks, proxy/tunnel setup, and port conflicts on the AI server before changing its services. Never infer AI server state from the coding VPS.
 - Use a feature branch for substantive changes and present a diff for review. Do not force-push or overwrite existing containers, volumes, DNS records, or production data.
 - Keep `.env`, database files, exports and real media out of Git. Ask the owner to enter credentials locally; never print secrets in logs or commit them.
 - Preserve existing user data. Back up the SQLite volume before schema changes or deployments that could affect it.
