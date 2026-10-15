@@ -2,12 +2,14 @@
 
 Private project, episode and character dashboard. This edition runs as one Docker container with a SQLite database on a persistent Docker volume. Python's standard library is the only app dependency.
 
-## Deploy on your VPS
+## Deploy on the AI server
 
-1. Clone this repository on your VPS and enter its directory.
+Development and tests may run on a separate coding host. Production deployment belongs on the AI server only. Do not infer the AI server's containers, networks, proxy, ports or DNS from a development machine. Review [DEPLOYMENT.md](DEPLOYMENT.md) before making production changes; its AI-server checks require authorized access and explicit deployment approval.
+
+1. Clone this repository on the AI server and enter its directory.
 2. Copy `.env.example` to `.env`. Set your own long random `AICS_PASSWORD` and username. Keep `.env` out of Git.
 3. Run `docker compose up -d --build`.
-4. Check `docker compose ps` and `curl http://127.0.0.1:8787/healthz` on the VPS.
+4. Check `docker compose ps` and `curl http://127.0.0.1:8787/healthz` on the AI server.
 5. Put the service behind your HTTPS reverse proxy or Cloudflare Tunnel. The Compose port is bound to **127.0.0.1 only**. Route your chosen hostname to `http://127.0.0.1:8787` if the proxy runs on the host. If your tunnel runs inside another container, attach it to the Compose network and route it to `http://studio:8787` instead. Do not expose the container's HTTP port directly to the internet: Basic authentication requires HTTPS in transit.
 6. Visit the HTTPS URL and sign in with the `.env` credentials. For an extra gate, add your existing Cloudflare Access policy in front of the service.
 
@@ -21,22 +23,34 @@ Once imported, edits to this Docker edition are shared between browsers and devi
 
 ## Backup
 
-Run a consistent SQLite backup from the VPS (adjust the service name if changed):
+Run a consistent SQLite backup from the AI server (adjust the service name if changed):
 
 ```sh
 docker compose exec -T studio python -c "import sqlite3; src=sqlite3.connect('/data/studio.sqlite3'); dst=sqlite3.connect('/data/studio-backup.sqlite3'); src.backup(dst); dst.close(); src.close()"
 docker compose cp studio:/data/studio-backup.sqlite3 ./studio-backup.sqlite3
 ```
 
-Store the backup outside the VPS too. The dashboard's **Export JSON** is a portable data backup, but it is not a substitute for a routine off-server backup.
+Store the backup outside the AI server too. The dashboard's **Export JSON** is a portable data backup, but it is not a substitute for a routine off-server backup.
 
 ## Development
 
 Without Docker, set `AICS_USERNAME`, `AICS_PASSWORD`, `AICS_DB_PATH` and optional `PORT` in your shell, then run `python3 server.py`. The server serves `dist/` and offers `GET/PUT /api/workspace`. Writes include a revision so a stale tab cannot overwrite newer data. `GET /healthz` is public for a local health check. The app intentionally uses a single workspace and a single credential; do not share this login with separate untrusted users.
 
+Run the focused checks before review:
+
+```sh
+node --check dist/app.js
+node --check dist/seed.js
+python3 -m py_compile server.py
+python3 -m unittest discover -s tests -v
+docker build -t ai-content-studio:review .
+```
+
+The final command is required only where Docker is available. A missing tool means its check is still unverified.
+
 ## Scope and future releases
 
-This is a single-owner MVP. It tracks projects, scripts and character sheets; it does not yet upload media, delete or rename projects, manage teams, or publish to social platforms. Automation is planned but is not enabled. The software stack is free and open source; your VPS and domain may have their own hosting costs.
+This is a single-owner MVP. It tracks projects, scripts and character sheets; it does not yet upload media, delete or rename projects, manage teams, or publish to social platforms. Automation is planned but is not enabled. The software stack is free and open source; your AI server and domain may have their own hosting costs.
 
 The public source contains fictional sample data only. Your actual workspace lives in the SQLite volume and is excluded from Git. Keep exported JSON and `.env` private. Before switching a private repository to public, select an open-source license, review repository history and GitHub settings, and verify there are no secrets or personal production assets.
 
