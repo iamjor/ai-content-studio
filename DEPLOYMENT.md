@@ -38,7 +38,7 @@ Every item below requires separately authorized AI server access.
 - [ ] **AI server access required:** record a private rollback image or commit.
 - [ ] **AI server access required:** set the initial admin values in private `.env`.
 
-The first start creates schema version 2 and copies the shared workspace to the initial admin. It leaves the legacy table unchanged and cannot overwrite a newer per-user workspace.
+The first start creates schema version 3 and copies the shared workspace to the initial admin, adds non-destructive archive fields, seeds the SQLite tool catalog, and creates private image metadata. It leaves the legacy table unchanged and cannot overwrite a newer per-user workspace or revision.
 
 ## 4. Production rollout
 
@@ -47,7 +47,7 @@ These steps require explicit approval after review and merge.
 - [ ] **AI server access required:** fetch and build the exact reviewed commit.
 - [ ] **AI server access required:** update only AI Content Studio.
 - [ ] **AI server access required:** never run `docker compose down -v`.
-- [ ] **AI server access required:** confirm `studio_data` remains attached.
+- [ ] **AI server access required:** confirm `studio_data` remains attached and contains both SQLite and the private `/data/images` directory.
 - [ ] **AI server access required:** inspect migration logs without exposing private data.
 - [ ] **AI server access required:** remove the bootstrap password after successful creation and recreate the container.
 
@@ -60,10 +60,11 @@ These steps require explicit approval after review and merge.
 - [ ] **AI server access required:** verify a separate trusted client can sign in, untrusted peers cannot spoof client addresses, and unauthenticated API access is rejected.
 - [ ] **AI server access required:** verify enabled registration attempt limits and the total account cap.
 - [ ] **AI server access required:** verify HTTPS Origin matches the preserved public Host and the session cookie is Secure, HttpOnly, and SameSite Strict in the deployed browser.
-- [ ] **AI server access required:** verify migrated owner data and revision.
+- [ ] **AI server access required:** verify migrated owner data, stable IDs, revision, seeded tool catalog, and lifecycle flags.
 - [ ] **AI server access required:** test logout, expiry, CSRF, account changes, and reauthentication.
 - [ ] **AI server access required:** confirm registration is off unless intentionally opened.
-- [ ] **AI server access required:** confirm regular-user isolation and denied admin access.
+- [ ] **AI server access required:** confirm regular-user workspace and image isolation, denied admin access, user lifecycle controls, and last-admin protection.
+- [ ] **AI server access required:** test image upload, replacement, removal, persistence after container restart, and a complete volume backup and restore.
 - [ ] **AI server access required:** audit mobile and desktop layouts in both themes.
 - [ ] **AI server access required:** review logs without exposing private data.
 

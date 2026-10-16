@@ -8,6 +8,11 @@
 - Added closed-by-default registration and administrator user management.
 - Added account profile, password, and saved theme settings.
 - Added responsive light-blue dark and light themes, an original favicon, and attribution footer.
-- Expanded integration tests and self-hosting, migration, security, and release guidance.
+- Added explicit user disable, archive, restore, and scoped permanent deletion.
+- Added archive, restore, and deletion for projects, episodes, and characters, including empty workspaces.
+- Added private validated character reference images with replacement and cleanup.
+- Migrated the shared production tool catalog into administrator-managed SQLite records.
+- Replaced the spark mark with an original film and story mark and added explicit responsive sidebar controls.
+- Expanded integration tests and self-hosting, migration, backup, security, and release guidance.
 
 The first tag will follow separately approved deployment and browser audit.

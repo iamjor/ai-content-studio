@@ -23,13 +23,13 @@ Complete this before changing repository visibility. This file does not authoriz
 - [ ] Test a clean clone, environment setup, Docker build, admin bootstrap, login, and health check.
 - [ ] Test local non-Docker development with a temporary database.
 - [ ] Test the legacy single-owner migration against a backup copy.
-- [ ] Confirm rollback preserves the backup and legacy table.
+- [ ] Confirm rollback preserves the backup, legacy table, private image directory, and tool catalog.
 - [ ] Verify registration defaults off and Secure cookies default on.
 - [ ] Confirm README and deployment commands match the release.
 
 ## Security and privacy
 
-- [ ] Review hashing, session lifetime, cookie flags, CSRF, throttling, roles, isolation, and last-admin protection.
+- [ ] Review hashing, session lifetime, cookie flags, CSRF, throttling, roles, workspace and image isolation, scoped deletion, and last-admin protection.
 - [ ] Verify logs exclude passwords, cookies, CSRF tokens, bodies, and private content.
 - [ ] Enable private vulnerability reporting or document a private channel.
 - [ ] Review branch protection, required reviews, alerts, secret scanning, and release permissions.
