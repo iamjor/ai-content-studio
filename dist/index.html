@@ -1,15 +1,306 @@
-<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Content Studio</title><meta name="description" content="Private production workspace for AI video series and creative projects."><link rel="stylesheet" href="style.css"></head>
-<body><div class="shell"><aside class="side"><div class="brand"><div class="mark">✦</div><div><b>AI Content Studio</b><small>CREATIVE WORKSPACE</small></div></div><nav class="nav" aria-label="Sections"><button class="active" data-tab="overview"><span class="n">01</span> Studio home</button><button data-tab="projects"><span class="n">02</span> Projects</button><button data-tab="episodes"><span class="n">03</span> Episodes</button><button data-tab="characters"><span class="n">04</span> Characters</button><button data-tab="workflow"><span class="n">05</span> Workflow</button><button data-tab="tools"><span class="n">06</span> Tools</button></nav><div class="sidefoot">Private creative workspace<br>Records sync through your private studio database. Export a backup regularly.</div></aside>
-<main class="main"><header class="top"><div><div class="eyebrow">Your production workspace</div><h1>AI Content Studio</h1><p class="muted">Plan stories, lock characters, track episodes and build a repeatable AI video workflow.</p></div><div class="topactions"><button class="btn primary" id="newProject">+ New project</button><button class="btn" id="export">Export JSON</button><button class="btn" id="import">Import JSON</button><span id="syncStatus" class="muted" role="status">Loading…</span><input class="sr" type="file" accept="application/json" id="file"></div></header>
-<section class="section active" id="overview"><div class="hero"><div><div class="eyebrow">Built for more than one story</div><h2>Every idea gets its own world.</h2><p>A home for future microdramas, experiments and campaigns. Scripts, casts and assets stay inside their own project.</p></div><span class="pill">PRIVATE STUDIO</span></div><div class="stats"><div class="stat"><strong id="projectCount">1</strong><span>Projects</span></div><div class="stat"><strong id="episodeCount">6</strong><span>Total episodes</span></div><div class="stat"><strong id="readyCount">0</strong><span>Approved episodes</span></div><div class="stat"><strong id="sheetCount">0</strong><span>Approved character sheets</span></div></div><div class="rowhead"><div><h2>Project library</h2><p>Open a project to see its own episodes and characters.</p></div><button class="btn" data-go="projects">View all</button></div><div class="grid" id="homeProjects"></div><div class="rowhead"><div><h2>Studio workflow</h2><p>A reusable sequence for every series.</p></div></div><div class="workflow"><div class="step"><b>01 · CONCEPT</b><p>Genre, audience, title, tone and series promise.</p></div><div class="step"><b>02 · CANON</b><p>Scripts, character bible and approved reference sheets.</p></div><div class="step"><b>03 · GENERATE</b><p>Images, video clips, voices and asset provenance.</p></div><div class="step"><b>04 · FINISH</b><p>Continuity, lip sync, edit, sound and captions.</p></div><div class="step"><b>05 · RELEASE</b><p>Review, publish, measure and learn.</p></div></div></section>
-<section class="section" id="projects"><div class="rowhead"><div><h2>All projects</h2><p>Add a new series without changing the existing one.</p></div><button class="btn primary" data-new>+ New project</button></div><div class="grid" id="projectGrid"></div></section>
-<section class="section" id="episodes"><div class="projectbar"><div><span class="eyebrow">Selected project</span><h2 id="activeTitle"></h2><p id="activeMeta" class="muted"></p></div><button class="btn" data-go="projects">Change project</button></div><div class="rowhead"><div><h2>Episodes & scripts</h2><p>Each project keeps its own timeline and production status.</p></div><button class="btn primary" id="addEpisode">+ Episode</button></div><div class="grid" id="episodeGrid"></div></section>
-<section class="section" id="characters"><div class="projectbar"><div><span class="eyebrow">Character bible · selected project</span><h2 id="characterTitle"></h2><p class="muted">Written design and visual approval are separate stages.</p></div><button class="btn" data-go="projects">Change project</button></div><div class="rowhead"><div><h2>Cast & signature assets</h2></div><button class="btn primary" id="addCharacter">+ Character</button></div><div class="grid" id="characterGrid"></div></section>
-<section class="section" id="workflow"><div class="rowhead"><div><h2>Reusable production system</h2><p>One pipeline across all projects, with manual approval before publishing.</p></div></div><div class="workflow"><div class="step"><b>01 · SCRIPT</b><p>Write and time each episode to its target length.</p></div><div class="step"><b>02 · REFERENCE</b><p>Approve cast and world designs; lock model, seed and prompts.</p></div><div class="step"><b>03 · CLIPS</b><p>Generate short shots and track each asset and cost.</p></div><div class="step"><b>04 · EDIT</b><p>Voice, lip sync, SFX, music, captions and full review.</p></div><div class="step"><b>05 · POST</b><p>Human approval, native scheduling and performance log.</p></div></div><div class="rowhead"><div><h2>Automation later</h2></div></div><div class="notice">The next version can connect project records to an optional automation service such as n8n for asset naming, shot checklists, review reminders and analytics. Records sync across browsers and devices. Export JSON as an independent backup; import an older browser backup here to move it into the studio database.</div></section>
-<section class="section" id="tools"><div class="rowhead"><div><h2>Free-first production tools</h2><p>A shared toolkit for all future projects.</p></div></div><div class="stack" id="toolGrid"></div><div class="rowhead"><div><h2>Cost and rights</h2></div></div><div class="notice">Cloud video credits and free exports can change. Keep clean masters and approved character references. Use music with rights for every platform where you publish. Verify free-tier limits before generating a batch.</div></section>
-</main></div>
-<dialog class="modal" id="projectDialog"><form method="dialog" id="projectForm"><div class="eyebrow">New creative world</div><h2>Create project</h2><label class="field">Title<input id="pTitle" required maxlength="100" placeholder="e.g. The Blue Cup"></label><label class="field">Format or genre<input id="pGenre" maxlength="100" placeholder="AI microdrama, comedy, explainer..."></label><label class="field">Description<textarea id="pDescription" style="min-height:90px" maxlength="500" placeholder="What is this project about?"></textarea></label><div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" id="createProject" value="create">Create project</button></div></form></dialog>
-<dialog class="modal" id="editor"><form method="dialog" id="editForm"><div class="eyebrow" id="modalKicker"></div><h2 id="modalTitle"></h2><label class="field">Episode title<input id="eTitle" required maxlength="120"></label><label class="field">Hook<input id="hook" maxlength="180"></label><label class="field">Production status<select id="status"><option>Script draft</option><option>60s script ready</option><option>References approved</option><option>Assets generated</option><option>Editing</option><option>Ready for review</option><option>Approved</option><option>Published</option></select></label><label class="field">Target duration (seconds)<input id="duration" type="number" min="15" max="180"></label><label class="field">Full script / timing notes<textarea id="script"></textarea></label><label class="field">Asset folder or review link<input id="assetLink" type="text" placeholder="Paste a link or folder name"></label><div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" id="save" value="save">Save episode</button></div></form></dialog>
-<dialog class="modal" id="characterDialog"><form method="dialog" id="characterForm"><div class="eyebrow">Project canon</div><h2 id="characterModalTitle">Add character</h2><label class="field">Name<input id="cName" required maxlength="100"></label><label class="field">Role<input id="cRole" maxlength="100"></label><label class="field">Age or descriptor<input id="cAge" maxlength="70"></label><label class="field">Fixed appearance / continuity notes<textarea id="cLook" style="min-height:110px"></textarea></label><label class="field">Visual sheet status<select id="cState"><option>Written canon only</option><option>Generating reference</option><option>Reference approved</option></select></label><label class="field">Reference link<input id="cLink" type="text" placeholder="Optional asset or folder link"></label><div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" id="saveCharacter" value="save">Save</button></div></form></dialog>
-<script src="seed.js"></script><script src="app.js"></script></body></html>
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#08111f">
+  <title>AI Content Studio</title>
+  <meta name="description" content="A private workspace for AI video series and creative projects.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">Skip to content</a>
+
+  <section class="auth-view" id="authView" aria-labelledby="authTitle">
+    <div class="auth-top">
+      <div class="brand brand-large">
+        <img src="/favicon.svg" alt="" width="44" height="44">
+        <div><strong>AI Content Studio</strong><small>CREATIVE WORKSPACE</small></div>
+      </div>
+      <button class="icon-btn" id="loginThemeToggle" type="button" aria-label="Use light theme" title="Use light theme">
+        <span class="theme-glyph" aria-hidden="true">☀</span>
+      </button>
+    </div>
+    <div class="auth-card">
+      <div class="auth-intro">
+        <div class="eyebrow">Private by design</div>
+        <h1 id="authTitle">Welcome back</h1>
+        <p>Sign in to your private projects, episodes, characters, and production notes.</p>
+      </div>
+
+      <form id="loginForm" class="auth-form">
+        <label class="field">Username
+          <input id="loginUsername" type="text" name="username" autocomplete="username" required maxlength="40">
+        </label>
+        <label class="field">Password
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required maxlength="256">
+        </label>
+        <p class="form-status" id="loginStatus" role="status" aria-live="polite"></p>
+        <button class="btn primary wide" type="submit">Sign in</button>
+      </form>
+
+      <div id="registrationPrompt" class="auth-switch hidden">
+        <span>New to the studio?</span>
+        <button class="text-btn" id="showRegister" type="button">Create an account</button>
+      </div>
+
+      <form id="registerForm" class="auth-form hidden" aria-labelledby="registerTitle">
+        <div class="form-heading">
+          <div>
+            <div class="eyebrow">Registration</div>
+            <h2 id="registerTitle">Create your private workspace</h2>
+          </div>
+          <button class="icon-btn" id="hideRegister" type="button" aria-label="Return to sign in">×</button>
+        </div>
+        <label class="field">Display name
+          <input id="registerName" type="text" name="displayName" autocomplete="name" required maxlength="80">
+        </label>
+        <label class="field">Username
+          <input id="registerUsername" type="text" name="username" autocomplete="username" required minlength="3" maxlength="40" pattern="[A-Za-z0-9_.-]+">
+        </label>
+        <label class="field">Password
+          <input id="registerPassword" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
+        </label>
+        <p class="field-help">Use at least 12 characters. New accounts are always regular users.</p>
+        <p class="form-status" id="registerStatus" role="status" aria-live="polite"></p>
+        <button class="btn primary wide" type="submit">Create account</button>
+      </form>
+    </div>
+  </section>
+
+  <div class="app-view hidden" id="appView">
+    <div class="shell">
+      <aside class="side">
+        <div class="side-top">
+          <div class="brand">
+            <img src="/favicon.svg" alt="" width="36" height="36">
+            <div><strong>AI Content Studio</strong><small>CREATIVE WORKSPACE</small></div>
+          </div>
+          <button class="icon-btn mobile-only" id="navToggle" type="button" aria-label="Toggle navigation" aria-expanded="false" aria-controls="primaryNav">☰</button>
+        </div>
+        <nav class="nav" id="primaryNav" aria-label="Studio sections">
+          <button type="button" class="active" data-tab="overview"><span class="n">01</span><span>Studio home</span></button>
+          <button type="button" data-tab="projects"><span class="n">02</span><span>Projects</span></button>
+          <button type="button" data-tab="episodes"><span class="n">03</span><span>Episodes</span></button>
+          <button type="button" data-tab="characters"><span class="n">04</span><span>Characters</span></button>
+          <button type="button" data-tab="workflow"><span class="n">05</span><span>Workflow</span></button>
+          <button type="button" data-tab="tools"><span class="n">06</span><span>Tools</span></button>
+          <button type="button" data-tab="account"><span class="n">07</span><span>Account</span></button>
+          <button type="button" class="hidden" id="adminNav" data-tab="admin"><span class="n">08</span><span>Admin</span></button>
+        </nav>
+        <div class="sidefoot">
+          <strong id="sideUserName">Studio user</strong>
+          <span id="sideUserRole">Private workspace</span>
+        </div>
+      </aside>
+
+      <main class="main" id="mainContent" tabindex="-1">
+        <header class="top">
+          <div class="top-copy">
+            <div class="eyebrow">Your production workspace</div>
+            <h1>AI Content Studio</h1>
+            <p class="muted">Plan stories, lock characters, track episodes, and build a repeatable AI video workflow.</p>
+          </div>
+          <div class="topactions">
+            <button class="btn primary" id="newProject" type="button">+ New project</button>
+            <button class="btn" id="export" type="button">Export JSON</button>
+            <button class="btn" id="import" type="button">Import JSON</button>
+            <button class="icon-btn" id="themeToggle" type="button" aria-label="Use light theme" title="Use light theme">
+              <span class="theme-glyph" aria-hidden="true">☀</span>
+            </button>
+            <button class="btn" id="logout" type="button">Log out</button>
+            <span id="syncStatus" class="sync-status" role="status" aria-live="polite">Loading…</span>
+            <input class="sr" type="file" accept="application/json" id="file">
+          </div>
+        </header>
+
+        <section class="section active" id="overview" aria-labelledby="overviewTitle">
+          <div class="hero">
+            <div>
+              <div class="eyebrow">Built for more than one story</div>
+              <h2 id="overviewTitle">Every idea gets its own world.</h2>
+              <p>A home for future microdramas, experiments, and campaigns. Scripts, casts, and assets stay inside their own project.</p>
+            </div>
+            <span class="pill">PRIVATE STUDIO</span>
+          </div>
+          <div class="stats">
+            <div class="stat"><strong id="projectCount">0</strong><span>Projects</span></div>
+            <div class="stat"><strong id="episodeCount">0</strong><span>Total episodes</span></div>
+            <div class="stat"><strong id="readyCount">0</strong><span>Approved episodes</span></div>
+            <div class="stat"><strong id="sheetCount">0</strong><span>Approved character sheets</span></div>
+          </div>
+          <div class="rowhead">
+            <div><h2>Project library</h2><p>Open a project to see its episodes and characters.</p></div>
+            <button class="btn" data-go="projects" type="button">View all</button>
+          </div>
+          <div class="grid" id="homeProjects"></div>
+          <div class="rowhead"><div><h2>Studio workflow</h2><p>A reusable sequence for every series.</p></div></div>
+          <div class="workflow">
+            <div class="step"><b>01 · CONCEPT</b><p>Genre, audience, title, tone, and series promise.</p></div>
+            <div class="step"><b>02 · CANON</b><p>Scripts, character bible, and approved reference sheets.</p></div>
+            <div class="step"><b>03 · GENERATE</b><p>Images, video clips, voices, and asset provenance.</p></div>
+            <div class="step"><b>04 · FINISH</b><p>Continuity, lip sync, edit, sound, and captions.</p></div>
+            <div class="step"><b>05 · RELEASE</b><p>Review, publish, measure, and learn.</p></div>
+          </div>
+        </section>
+
+        <section class="section" id="projects" aria-labelledby="projectsTitle">
+          <div class="rowhead">
+            <div><h2 id="projectsTitle">All projects</h2><p>Add a new series without changing the existing one.</p></div>
+            <button class="btn primary" data-new type="button">+ New project</button>
+          </div>
+          <div class="grid" id="projectGrid"></div>
+        </section>
+
+        <section class="section" id="episodes" aria-labelledby="episodesTitle">
+          <div class="projectbar">
+            <div><span class="eyebrow">Selected project</span><h2 id="activeTitle">Selected project</h2><p id="activeMeta" class="muted"></p></div>
+            <button class="btn" data-go="projects" type="button">Change project</button>
+          </div>
+          <div class="rowhead">
+            <div><h2 id="episodesTitle">Episodes &amp; scripts</h2><p>Each project keeps its own timeline and production status.</p></div>
+            <button class="btn primary" id="addEpisode" type="button">+ Episode</button>
+          </div>
+          <div class="grid" id="episodeGrid"></div>
+        </section>
+
+        <section class="section" id="characters" aria-labelledby="charactersTitle">
+          <div class="projectbar">
+            <div><span class="eyebrow">Character bible · selected project</span><h2 id="characterTitle">Selected project</h2><p class="muted">Written design and visual approval are separate stages.</p></div>
+            <button class="btn" data-go="projects" type="button">Change project</button>
+          </div>
+          <div class="rowhead">
+            <div><h2 id="charactersTitle">Cast &amp; signature assets</h2></div>
+            <button class="btn primary" id="addCharacter" type="button">+ Character</button>
+          </div>
+          <div class="grid" id="characterGrid"></div>
+        </section>
+
+        <section class="section" id="workflow" aria-labelledby="workflowTitle">
+          <div class="rowhead"><div><h2 id="workflowTitle">Reusable production system</h2><p>One pipeline across all projects, with manual approval before publishing.</p></div></div>
+          <div class="workflow">
+            <div class="step"><b>01 · SCRIPT</b><p>Write and time each episode to its target length.</p></div>
+            <div class="step"><b>02 · REFERENCE</b><p>Approve cast and world designs; lock model, seed, and prompts.</p></div>
+            <div class="step"><b>03 · CLIPS</b><p>Generate short shots and track each asset and cost.</p></div>
+            <div class="step"><b>04 · EDIT</b><p>Voice, lip sync, SFX, music, captions, and full review.</p></div>
+            <div class="step"><b>05 · POST</b><p>Human approval, native scheduling, and performance log.</p></div>
+          </div>
+          <div class="rowhead"><div><h2>Automation later</h2></div></div>
+          <div class="notice">A future version can connect project records to an optional automation service for asset naming, shot checklists, review reminders, and analytics. Export JSON as an independent backup.</div>
+        </section>
+
+        <section class="section" id="tools" aria-labelledby="toolsTitle">
+          <div class="rowhead"><div><h2 id="toolsTitle">Free-first production tools</h2><p>A shared toolkit for future projects.</p></div></div>
+          <div class="stack" id="toolGrid"></div>
+          <div class="rowhead"><div><h2>Cost and rights</h2></div></div>
+          <div class="notice">Cloud video credits and free exports can change. Keep clean masters and approved character references. Use music with rights for every platform where you publish.</div>
+        </section>
+
+        <section class="section" id="account" aria-labelledby="accountTitle">
+          <div class="section-heading">
+            <div class="eyebrow">Personal settings</div>
+            <h2 id="accountTitle">Your account</h2>
+            <p class="muted">Your theme and workspace belong only to this account.</p>
+          </div>
+          <div class="settings-grid">
+            <form class="panel" id="profileForm">
+              <h3>Profile</h3>
+              <label class="field">Username
+                <input id="accountUsername" type="text" disabled>
+              </label>
+              <label class="field">Display name
+                <input id="accountDisplayName" type="text" required maxlength="80" autocomplete="name">
+              </label>
+              <p class="form-status" id="profileStatus" role="status"></p>
+              <button class="btn primary" type="submit">Save profile</button>
+            </form>
+            <form class="panel" id="passwordForm">
+              <h3>Change password</h3>
+              <label class="field">Current password
+                <input id="currentPassword" type="password" autocomplete="current-password" required maxlength="256">
+              </label>
+              <label class="field">New password
+                <input id="newPassword" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
+              </label>
+              <p class="field-help">Changing your password signs out every active session.</p>
+              <p class="form-status" id="passwordStatus" role="status"></p>
+              <button class="btn primary" type="submit">Change password</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="section" id="admin" aria-labelledby="adminTitle">
+          <div class="section-heading">
+            <div class="eyebrow">Administrator</div>
+            <h2 id="adminTitle">User management</h2>
+            <p class="muted">Registration creates regular users only. At least one active administrator is always required.</p>
+          </div>
+          <form class="panel registration-setting" id="registrationSettingsForm">
+            <div>
+              <h3>Self-registration</h3>
+              <p>Keep this off unless you are ready to accept new accounts.</p>
+            </div>
+            <label class="switch-row">
+              <input id="registrationEnabled" type="checkbox">
+              <span>Allow registration</span>
+            </label>
+            <button class="btn primary" type="submit">Save setting</button>
+            <p class="form-status" id="adminSettingsStatus" role="status"></p>
+          </form>
+          <div class="rowhead"><div><h2>Users</h2><p>Change roles or disable access without deleting workspace data.</p></div></div>
+          <div class="user-list" id="userList"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <span><strong id="footerAppName">AI Content Studio</strong> <span id="footerVersion"></span></span>
+    <span>© <span id="footerYear"></span> · Developed by <a href="https://www.jomaroliverreyes.com/" target="_blank" rel="noopener noreferrer">Jomar Oliver Reyes</a></span>
+  </footer>
+
+  <dialog class="modal" id="projectDialog">
+    <form method="dialog" id="projectForm">
+      <div class="eyebrow">New creative world</div>
+      <h2>Create project</h2>
+      <label class="field">Title<input id="pTitle" type="text" required maxlength="100" placeholder="e.g. The Blue Cup"></label>
+      <label class="field">Format or genre<input id="pGenre" type="text" maxlength="100" placeholder="AI microdrama, comedy, explainer..."></label>
+      <label class="field">Description<textarea id="pDescription" class="textarea-short" maxlength="500" placeholder="What is this project about?"></textarea></label>
+      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="create">Create project</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="editor">
+    <form method="dialog" id="editForm">
+      <div class="eyebrow" id="modalKicker"></div>
+      <h2 id="modalTitle">Episode</h2>
+      <label class="field">Episode title<input id="eTitle" type="text" required maxlength="120"></label>
+      <label class="field">Hook<input id="hook" type="text" maxlength="180"></label>
+      <label class="field">Production status<select id="status"><option>Script draft</option><option>60s script ready</option><option>References approved</option><option>Assets generated</option><option>Editing</option><option>Ready for review</option><option>Approved</option><option>Published</option></select></label>
+      <label class="field">Target duration (seconds)<input id="duration" type="number" min="15" max="180"></label>
+      <label class="field">Full script / timing notes<textarea id="script"></textarea></label>
+      <label class="field">Asset folder or review link<input id="assetLink" type="text" placeholder="Paste a link or folder name"></label>
+      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="save">Save episode</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="characterDialog">
+    <form method="dialog" id="characterForm">
+      <div class="eyebrow">Project canon</div>
+      <h2 id="characterModalTitle">Add character</h2>
+      <label class="field">Name<input id="cName" type="text" required maxlength="100"></label>
+      <label class="field">Role<input id="cRole" type="text" maxlength="100"></label>
+      <label class="field">Age or descriptor<input id="cAge" type="text" maxlength="70"></label>
+      <label class="field">Fixed appearance / continuity notes<textarea id="cLook" class="textarea-medium"></textarea></label>
+      <label class="field">Visual sheet status<select id="cState"><option>Written canon only</option><option>Generating reference</option><option>Reference approved</option></select></label>
+      <label class="field">Reference link<input id="cLink" type="text" placeholder="Optional asset or folder link"></label>
+      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="save">Save character</button></div>
+    </form>
+  </dialog>
+
+  <script src="/seed.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

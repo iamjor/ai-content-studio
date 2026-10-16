@@ -1,9 +1,23 @@
 # Contributing
 
-Thanks for improving AI Content Studio. Open an issue with a concrete use case before large changes. Keep sample data fictional and avoid committing `.env`, database files, exports, media, credentials or personal project content.
+Keep sample data fictional. Never commit `.env`, SQLite files, exports, backups, media, credentials, logs, or personal content.
 
-For changes, run `node --check dist/app.js`, `node --check dist/seed.js`, `python3 -m py_compile server.py` and `python3 -m unittest discover -s tests -v`. Build the Docker image where Docker is available. Keep UI copy and README instructions current. Use small pull requests and note any database migration or backward compatibility impact.
+## Development standard
 
-Use plain punctuation in prose and do not use em dashes. En dashes are acceptable for numeric ranges such as `0–3 seconds`.
+Document meaningful functions, classes, features, security decisions, migrations, side effects, and failure behavior. Use Python docstrings and concise JSDoc or nearby JavaScript comments.
 
-The repository owner will choose a license before public release. Until then, this code is available only under the repository's access settings.
+Do not use U+2014 in code comments, UI copy, documentation, commit messages, or pull request text. En dashes remain acceptable for numeric ranges such as `0–3 seconds`.
+
+Run:
+
+```sh
+node --check dist/app.js
+node --check dist/seed.js
+python3 -m py_compile server.py tests/test_server.py
+python3 -m unittest discover -s tests -v
+docker build -t ai-content-studio:review .
+```
+
+Review narrow mobile and desktop widths in both themes. Report missing runtime, browser, or Docker tooling as unverified.
+
+Explain authentication, persistence, migration, compatibility, tests, screenshots, and limitations in the pull request. Do not add a license or change visibility until the owner decides.

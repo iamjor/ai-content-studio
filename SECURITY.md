@@ -1,5 +1,19 @@
 # Security
 
-Please do not post credentials, database backups, private story assets or vulnerabilities in public issues. Once the repository exists, use its private GitHub vulnerability reporting or security advisory flow to report a security issue. Rotate the studio password if it is exposed.
+Do not post credentials, backups, private assets, session cookies, personal logs, or vulnerability details in public issues. Use GitHub private vulnerability reporting or a private owner contact listed on the verified public portfolio.
 
-Run the app behind HTTPS; the container binds only to localhost by default. Authentication is single-owner HTTP Basic authentication. The SQLite database and `.env` are not tracked by Git. Review the deployment's proxy and access settings before inviting others.
+## Deployment requirements
+
+Run behind HTTPS. Compose binds to `127.0.0.1`. Secure cookies are enabled by default and must remain enabled publicly.
+
+Registration is disabled by default and creates regular users only. Open it only intentionally.
+
+Passwords use salted PBKDF2-SHA256 records. Sessions are random, fixed-lifetime, stored server-side, and transported in HttpOnly, SameSite Strict cookies. State changes require a CSRF token. Login failures are throttled.
+
+Rotate exposed passwords immediately. Password changes revoke all user sessions. Disable accounts from Admin when access must stop.
+
+SQLite, `.env`, exports, and backups are excluded from Git. Protect off-server backups and review proxy, access, and logging settings.
+
+## Unsupported controls
+
+This personal project has no email verification, password-reset email, MFA, external identity provider, audit-log retention, or automated account deletion. Add an external access layer or keep registration closed when those controls are required.
