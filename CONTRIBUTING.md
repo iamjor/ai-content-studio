@@ -18,6 +18,6 @@ python3 -m unittest discover -s tests -v
 docker build -t ai-content-studio:review .
 ```
 
-Review narrow mobile and desktop widths in both themes. Report missing runtime, browser, or Docker tooling as unverified.
+Review phone, tablet, and desktop widths in both themes, including a long page with the sidebar open and closed. Use only fictional or approved screenshot content. Report missing runtime, browser, or Docker tooling as unverified.
 
 Explain authentication, persistence, migration, compatibility, tests, screenshots, and limitations in the pull request. Do not add a license or change visibility until the owner decides.

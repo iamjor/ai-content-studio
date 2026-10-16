@@ -72,13 +72,13 @@
 
   <div class="app-view hidden" id="appView">
     <div class="shell">
-      <aside class="side">
+      <aside class="side" id="sidebar">
         <div class="side-top">
           <div class="brand">
             <img src="/favicon.svg" alt="" width="36" height="36">
             <div><strong>AI Content Studio</strong><small>CREATIVE WORKSPACE</small></div>
           </div>
-          <button class="icon-btn mobile-only" id="navToggle" type="button" aria-label="Toggle navigation" aria-expanded="false" aria-controls="primaryNav">☰</button>
+          <button class="icon-btn" id="navToggle" type="button" aria-label="Open sidebar" aria-expanded="true" aria-controls="primaryNav"><span aria-hidden="true">‹</span><span class="sr" id="navToggleText">Close sidebar</span></button>
         </div>
         <nav class="nav" id="primaryNav" aria-label="Studio sections">
           <button type="button" class="active" data-tab="overview"><span class="n">01</span><span>Studio home</span></button>
@@ -105,7 +105,7 @@
           </div>
           <div class="topactions">
             <button class="btn primary" id="newProject" type="button">+ New project</button>
-            <button class="btn" id="export" type="button">Export JSON</button>
+            <button class="btn" id="export" type="button">Export text-only JSON</button>
             <button class="btn" id="import" type="button">Import JSON</button>
             <button class="icon-btn" id="themeToggle" type="button" aria-label="Use light theme" title="Use light theme">
               <span class="theme-glyph" aria-hidden="true">☀</span>
@@ -148,8 +148,8 @@
 
         <section class="section" id="projects" aria-labelledby="projectsTitle">
           <div class="rowhead">
-            <div><h2 id="projectsTitle">All projects</h2><p>Add a new series without changing the existing one.</p></div>
-            <button class="btn primary" data-new type="button">+ New project</button>
+            <div><h2 id="projectsTitle">Projects</h2><p>Archive finished work or restore it later.</p></div>
+            <div class="action-row"><label class="compact-field">View<select id="projectFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" data-new type="button">+ New project</button></div>
           </div>
           <div class="grid" id="projectGrid"></div>
         </section>
@@ -161,7 +161,7 @@
           </div>
           <div class="rowhead">
             <div><h2 id="episodesTitle">Episodes &amp; scripts</h2><p>Each project keeps its own timeline and production status.</p></div>
-            <button class="btn primary" id="addEpisode" type="button">+ Episode</button>
+            <div class="action-row"><label class="compact-field">View<select id="episodeFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addEpisode" type="button">+ Episode</button></div>
           </div>
           <div class="grid" id="episodeGrid"></div>
         </section>
@@ -173,7 +173,7 @@
           </div>
           <div class="rowhead">
             <div><h2 id="charactersTitle">Cast &amp; signature assets</h2></div>
-            <button class="btn primary" id="addCharacter" type="button">+ Character</button>
+            <div class="action-row"><label class="compact-field">View<select id="characterFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addCharacter" type="button">+ Character</button></div>
           </div>
           <div class="grid" id="characterGrid"></div>
         </section>
@@ -192,8 +192,8 @@
         </section>
 
         <section class="section" id="tools" aria-labelledby="toolsTitle">
-          <div class="rowhead"><div><h2 id="toolsTitle">Free-first production tools</h2><p>A shared toolkit for future projects.</p></div></div>
-          <div class="stack" id="toolGrid"></div>
+          <div class="rowhead"><div><h2 id="toolsTitle">Production tools</h2><p>An administrator-managed shared catalog.</p></div><label class="compact-field hidden" id="toolFilterWrap">View<select id="toolFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
+          <div class="stack" id="toolGrid"></div><form class="panel hidden" id="toolForm"><h3 id="toolFormTitle">Add tool</h3><input id="toolId" type="hidden"><div class="settings-grid"><label class="field">Name<input id="toolName" type="text" required maxlength="100"></label><label class="field">Category<input id="toolCategory" type="text" required maxlength="60"></label></div><label class="field">Official HTTPS link<input id="toolUrl" type="url" required maxlength="500" pattern="https://.*"></label><label class="field">Short purpose<textarea id="toolPurpose" class="textarea-short" required maxlength="300"></textarea></label><label class="field">Optional notes<textarea id="toolNotes" class="textarea-short" maxlength="500"></textarea></label><div class="action-row"><button class="btn primary" type="submit">Save tool</button><button class="btn" id="cancelToolEdit" type="button">Clear</button></div><p class="form-status" id="toolStatus" role="status"></p></form>
           <div class="rowhead"><div><h2>Cost and rights</h2></div></div>
           <div class="notice">Cloud video credits and free exports can change. Keep clean masters and approved character references. Use music with rights for every platform where you publish.</div>
         </section>
@@ -249,7 +249,7 @@
             <button class="btn primary" type="submit">Save setting</button>
             <p class="form-status" id="adminSettingsStatus" role="status"></p>
           </form>
-          <div class="rowhead"><div><h2>Users</h2><p>Change roles or disable access without deleting workspace data.</p></div></div>
+          <div class="rowhead"><div><h2>Users</h2><p>Disable or archive without losing data. Permanent deletion removes only the selected account workspace and uploads.</p></div><label class="compact-field">View<select id="userFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
           <div class="user-list" id="userList"></div>
         </section>
       </main>
@@ -282,7 +282,7 @@
       <label class="field">Target duration (seconds)<input id="duration" type="number" min="15" max="180"></label>
       <label class="field">Full script / timing notes<textarea id="script"></textarea></label>
       <label class="field">Asset folder or review link<input id="assetLink" type="text" placeholder="Paste a link or folder name"></label>
-      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="save">Save episode</button></div>
+      <div class="modalactions"><button class="btn danger" id="deleteEpisode" type="button">Delete episode</button><button class="btn" id="archiveEpisode" type="button">Archive</button><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="save">Save episode</button></div>
     </form>
   </dialog>
 
@@ -296,7 +296,8 @@
       <label class="field">Fixed appearance / continuity notes<textarea id="cLook" class="textarea-medium"></textarea></label>
       <label class="field">Visual sheet status<select id="cState"><option>Written canon only</option><option>Generating reference</option><option>Reference approved</option></select></label>
       <label class="field">Reference link<input id="cLink" type="text" placeholder="Optional asset or folder link"></label>
-      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="save">Save character</button></div>
+      <label class="field">Private reference image<input id="cImage" type="file" accept="image/png,image/jpeg,image/webp"><span class="field-help">PNG, JPEG, or WebP up to 5 MB. Stored in this account only.</span></label><div id="characterImageActions" class="action-row hidden"><button class="btn danger" id="removeCharacterImage" type="button">Remove image</button></div>
+      <div class="modalactions"><button class="btn danger hidden" id="deleteCharacter" type="button">Delete character</button><button class="btn" id="archiveCharacter" type="button">Archive</button><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="save">Save character</button></div>
     </form>
   </dialog>
 

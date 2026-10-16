@@ -1,5 +1,6 @@
 """Integration tests for authentication, authorization, migration, and isolation."""
 
+import base64
 import concurrent.futures
 import http.cookies
 import json
@@ -41,6 +42,7 @@ class TestClient:
         payload=None,
         include_csrf=True,
         extra_headers=None,
+        raw_body=None,
     ):
         """Send one request and return status, decoded body, and headers."""
         headers = {}
@@ -52,7 +54,9 @@ class TestClient:
             headers["Sec-Fetch-Site"] = "same-origin"
         if include_csrf and self.csrf_token and method != "GET":
             headers["X-CSRF-Token"] = self.csrf_token
-        if payload is not None:
+        if raw_body is not None:
+            body = raw_body
+        elif payload is not None:
             headers["Content-Type"] = "application/json"
             body = json.dumps(payload).encode("utf-8")
         headers.update(extra_headers or {})
@@ -70,6 +74,8 @@ class TestClient:
         content_type = response.headers.get("Content-Type", "")
         if "application/json" in content_type:
             value = json.loads(raw or b"{}")
+        elif content_type.startswith("image/"):
+            value = raw
         else:
             value = raw.decode("utf-8")
         self._capture_cookie(response.headers)
@@ -393,7 +399,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(session["authenticated"])
         self.assertFalse(session["registrationEnabled"])
-        self.assertEqual(session["version"], "0.2.0")
+        self.assertEqual(session["version"], "0.3.0")
 
     def test_02_admin_login_hashing_and_legacy_migration(self):
         """Hash the bootstrap password and assign legacy data to the initial admin."""
@@ -409,7 +415,11 @@ class ServerIntegrationTests(unittest.TestCase):
         status, workspace, _ = admin.request("/api/workspace")
         self.assertEqual(status, 200)
         self.assertEqual(workspace["revision"], 7)
-        self.assertEqual(workspace["data"], self.legacy_workspace)
+        self.assertFalse(workspace["data"]["projects"][0]["archived"])
+        self.assertEqual(
+            workspace["data"]["projects"][0]["title"],
+            self.legacy_workspace["projects"][0]["title"],
+        )
 
         with sqlite3.connect(self.database_path) as database:
             stored = database.execute(
@@ -491,8 +501,14 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual((status, saved["revision"]), (200, 1))
 
-        self.assertEqual(first.request("/api/workspace")[1]["data"], first_data)
-        self.assertEqual(second.request("/api/workspace")[1]["data"], second_data)
+        self.assertEqual(
+            first.request("/api/workspace")[1]["data"]["projects"][0]["title"],
+            "Alice story",
+        )
+        self.assertEqual(
+            second.request("/api/workspace")[1]["data"]["projects"][0]["title"],
+            "Bob story",
+        )
         status, _, _ = first.request(
             "/api/workspace",
             method="PUT",
@@ -860,14 +876,164 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn(">Developed by JOR</a>", html)
         self.assertNotIn("Jomar Oliver Reyes</a>", html)
         self.assertIn('id="footerVersion"', html)
-        self.assertNotIn("0.2.0", html)
-        self.assertNotIn("0.2.0", script)
+        self.assertNotIn("0.3.0", html)
+        self.assertNotIn("0.3.0", script)
         self.assertIn('html[data-theme="light"]', css)
         self.assertIn("overflow-x: hidden", css)
         self.assertIn("min-height: 44px", css)
         self.assertIn("@media (max-width: 520px)", css)
-        self.assertIn("<svg", favicon)
-        self.assertIn("creative spark", favicon)
+        favicon_text = favicon.decode("utf-8")
+        self.assertIn("<svg", favicon_text)
+        self.assertIn("film and story mark", favicon_text)
+        self.assertNotIn("creative spark", favicon_text)
+        self.assertIn('id="navToggle"', html)
+        self.assertIn('id="projectFilter"', html)
+        self.assertIn('id="cImage"', html)
+        self.assertIn("Uploaded images are not included", script)
+    def reset_regular_users(self):
+        """Remove prior test accounts while retaining the initial administrator."""
+        with sqlite3.connect(self.database_path) as database:
+            database.execute("PRAGMA foreign_keys=ON")
+            database.execute("DELETE FROM users WHERE username<>?", (ADMIN_USERNAME,))
+
+    def test_14_user_lifecycle_and_scoped_deletion(self):
+        """Retain archived data, revoke access, and delete only the selected user."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        managed = TestClient(self.base_url)
+        self.assertEqual(managed.register("lifecycle", "Lifecycle User", "lifecycle-password-123")[0], 201)
+        workspace = {"projects": [{"id": "kept", "title": "Kept", "episodes": [], "characters": [{"id": "kept-cast", "name": "Fictional cast"}]}], "activeId": "kept"}
+        self.assertEqual(managed.request("/api/workspace", method="PUT", payload={"revision": 0, "data": workspace})[0], 200)
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        self.assertEqual(managed.request("/api/characters/kept-cast/image", method="PUT", raw_body=png, extra_headers={"Content-Type": "image/png"})[0], 200)
+        admin = self.admin_client()
+        users = admin.request("/api/admin/users")[1]["users"]
+        target = next(user for user in users if user["username"] == "lifecycle")
+        endpoint = "/api/admin/users/" + str(target["id"])
+
+        self.assertEqual(admin.request(endpoint, method="PUT", payload={"action": "archive"})[0], 200)
+        self.assertFalse(managed.request("/api/session")[1]["authenticated"])
+        self.assertEqual(TestClient(self.base_url).login("lifecycle", "lifecycle-password-123")[0], 401)
+        archived = next(user for user in admin.request("/api/admin/users")[1]["users"] if user["id"] == target["id"])
+        self.assertTrue(archived["archived"])
+
+        self.assertEqual(admin.request(endpoint, method="PUT", payload={"action": "restore"})[0], 200)
+        restored = TestClient(self.base_url)
+        self.assertEqual(restored.login("lifecycle", "lifecycle-password-123")[0], 200)
+        self.assertEqual(restored.request("/api/workspace")[1]["data"]["projects"][0]["id"], "kept")
+        self.assertEqual(admin.request(endpoint, method="PUT", payload={"action": "disable"})[0], 200)
+        self.assertFalse(restored.request("/api/session")[1]["authenticated"])
+        self.assertEqual(admin.request(endpoint, method="PUT", payload={"action": "restore"})[0], 200)
+        self.assertEqual(admin.request(endpoint, method="DELETE")[0], 200)
+        self.assertEqual(TestClient(self.base_url).login("lifecycle", "lifecycle-password-123")[0], 401)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(database.execute("SELECT COUNT(*) FROM workspaces WHERE user_id=?", (target["id"],)).fetchone()[0], 0)
+        self.assertFalse((self.database_path.parent / "images" / str(target["id"])).exists())
+        self.assertEqual(admin.request("/api/workspace")[1]["data"]["projects"][0]["id"], "legacy-series")
+        owner = next(user for user in admin.request("/api/admin/users")[1]["users"] if user["username"] == ADMIN_USERNAME)
+        owner_endpoint = "/api/admin/users/" + str(owner["id"])
+        self.assertEqual(admin.request(owner_endpoint, method="PUT", payload={"action": "archive"})[0], 409)
+        self.assertEqual(admin.request(owner_endpoint, method="DELETE")[0], 409)
+
+    def test_15_workspace_lifecycle_empty_and_legacy_compatibility(self):
+        """Round-trip lifecycle fields, legacy IDs, and an intentionally empty workspace."""
+        admin = self.admin_client()
+        current = admin.request("/api/workspace")[1]
+        data = {
+            "projects": [{
+                "id": "legacy-id", "title": "Lifecycle project", "archived": True,
+                "episodes": [{"id": "EP01", "title": "Archived episode", "archived": True}],
+                "characters": [{"id": "cast-id", "name": "Archived cast", "archived": True}],
+            }],
+            "activeId": "legacy-id",
+        }
+        status, saved, _ = admin.request("/api/workspace", method="PUT", payload={"revision": current["revision"], "data": data})
+        self.assertEqual(status, 200, saved)
+        loaded = admin.request("/api/workspace")[1]
+        self.assertEqual(loaded["data"]["projects"][0]["id"], "legacy-id")
+        self.assertTrue(loaded["data"]["projects"][0]["episodes"][0]["archived"])
+        status, saved, _ = admin.request("/api/workspace", method="PUT", payload={"revision": loaded["revision"], "data": {"projects": [], "activeId": ""}})
+        self.assertEqual(status, 200, saved)
+        self.assertEqual(admin.request("/api/workspace")[1]["data"], {"projects": [], "activeId": ""})
+
+    def test_16_private_character_images(self):
+        """Isolate, validate, replace, remove, and persist private image bytes."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        first = TestClient(self.base_url)
+        second = TestClient(self.base_url)
+        self.assertEqual(first.register("imageone", "Image One", "image-one-password")[0], 201)
+        self.assertEqual(second.register("imagetwo", "Image Two", "image-two-password")[0], 201)
+        for client, project_id in ((first, "one"), (second, "two")):
+            data = {"projects": [{"id": project_id, "title": project_id, "episodes": [], "characters": [{"id": "shared-character", "name": "Cast"}]}], "activeId": project_id}
+            self.assertEqual(client.request("/api/workspace", method="PUT", payload={"revision": 0, "data": data})[0], 200)
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        path = "/api/characters/shared-character/image"
+        self.assertEqual(first.request(path, method="PUT", raw_body=png, extra_headers={"Content-Type": "image/png"})[0], 200)
+        self.assertEqual(first.request(path)[1], png)
+        self.assertEqual(second.request(path)[0], 404)
+        self.assertEqual(first.request("/api/workspace")[1]["imageCharacterIds"], ["shared-character"])
+        self.assertEqual(first.request(path, method="PUT", raw_body=b"not-an-image", extra_headers={"Content-Type": "image/png"})[0], 400)
+        oversized_handler = object.__new__(server.Handler)
+        oversized_handler.headers = {"Content-Length": str(server.MAX_IMAGE_BYTES + 1)}
+        with self.assertRaises(ValueError):
+            oversized_handler.read_body(server.MAX_IMAGE_BYTES)
+        webp_payload = b"\x00" * 10
+        webp = (
+            b"RIFF"
+            + (4 + 8 + len(webp_payload)).to_bytes(4, "little")
+            + b"WEBPVP8X"
+            + len(webp_payload).to_bytes(4, "little")
+            + webp_payload
+        )
+        self.assertEqual(first.request(path, method="PUT", raw_body=webp, extra_headers={"Content-Type": "image/webp"})[0], 200)
+        self.assertEqual(first.request(path)[1], webp)
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            server.setup()
+        self.assertEqual(first.request(path)[1], webp)
+        with sqlite3.connect(self.database_path) as database:
+            user_id = database.execute("SELECT id FROM users WHERE username='imageone'").fetchone()[0]
+            image_count = database.execute("SELECT COUNT(*) FROM character_images WHERE user_id=?", (user_id,)).fetchone()[0]
+        self.assertEqual(image_count, 1)
+        self.assertEqual(first.request(path, method="DELETE")[0], 200)
+        self.assertEqual(first.request(path)[0], 404)
+        self.assertEqual(first.request(path, method="PUT", raw_body=png, extra_headers={"Content-Type": "image/png"})[0], 200)
+        current = first.request("/api/workspace")[1]
+        current["data"]["projects"][0]["characters"] = []
+        self.assertEqual(first.request("/api/workspace", method="PUT", payload={"revision": current["revision"], "data": current["data"]})[0], 200)
+        self.assertEqual(first.request(path)[0], 404)
+
+    def test_17_tool_catalog_permissions_and_validation(self):
+        """Persist categorized tool CRUD and restrict management to administrators."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        regular = TestClient(self.base_url)
+        self.assertEqual(regular.register("toolviewer", "Tool Viewer", "tool-viewer-password")[0], 201)
+        self.assertEqual(regular.request("/api/tools")[0], 200)
+        valid = {"name": "Fictional Editor", "category": "Editing", "url": "https://example.com/editor", "purpose": "Edit fictional scenes.", "notes": "Sample only."}
+        self.assertEqual(regular.request("/api/admin/tools", method="POST", payload=valid)[0], 403)
+        admin = self.admin_client()
+        self.assertEqual(admin.request("/api/admin/tools", method="POST", payload=dict(valid, url="http://example.com"))[0], 400)
+        status, created, _ = admin.request("/api/admin/tools", method="POST", payload=valid)
+        self.assertEqual(status, 201, created)
+        tool_id = created["tool"]["id"]
+        self.assertEqual(created["tool"]["category"], "Editing")
+        self.assertEqual(admin.request("/api/admin/tools/" + str(tool_id), method="PUT", payload={"action": "archive"})[0], 200)
+        self.assertNotIn(tool_id, [tool["id"] for tool in regular.request("/api/tools")[1]["tools"]])
+        admin_tools = admin.request("/api/tools")[1]["tools"]
+        self.assertTrue(next(tool for tool in admin_tools if tool["id"] == tool_id)["archived"])
+        self.assertEqual(admin.request("/api/admin/tools/" + str(tool_id), method="PUT", payload={"action": "restore"})[0], 200)
+        edited = dict(valid, action="edit", name="Updated Editor")
+        self.assertEqual(admin.request("/api/admin/tools/" + str(tool_id), method="PUT", payload=edited)[1]["tool"]["name"], "Updated Editor")
+        self.assertEqual(admin.request("/api/admin/tools/" + str(tool_id), method="DELETE")[0], 200)
+        with sqlite3.connect(self.database_path) as database:
+            database.execute("DELETE FROM tools")
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            server.setup()
+        self.assertEqual(admin.request("/api/tools")[1]["tools"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

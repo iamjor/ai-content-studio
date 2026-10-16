@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import time
 from http.cookies import SimpleCookie
@@ -15,11 +16,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 APP_NAME = "AI Content Studio"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT / "dist"
 DB_PATH = Path(os.environ.get("AICS_DB_PATH", "/data/studio.sqlite3"))
+IMAGE_ROOT_OVERRIDE = os.environ.get("AICS_IMAGE_ROOT", "").strip()
 MAX_BYTES = 2_000_000
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 AUTH_MAX_BYTES = 4_096
 PASSWORD_ITERATIONS = 600_000
 LOGIN_LIMIT = 5
@@ -54,6 +57,19 @@ ADMIN_DISPLAY_NAME = os.environ.get(
     "AICS_ADMIN_DISPLAY_NAME", ADMIN_USERNAME or "Studio owner"
 ).strip()
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,40}$")
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+TOOL_SEEDS = (
+    ("ChatGPT", "Writing", "https://chatgpt.com/", "Story bible, scripts, prompts, and optional image references.", ""),
+    ("Google Flow", "Video", "https://labs.google/fx/tools/flow/", "Image-to-video experiments. Check current credit and export terms.", ""),
+    ("Google AI Studio", "Audio", "https://aistudio.google.com/", "Text-to-speech tests. Verify pronunciation, timing, and current limits.", ""),
+    ("CapCut", "Editing", "https://www.capcut.com/", "Assemble clips, effects, music, and captions. Check export licensing.", ""),
+    ("Kdenlive", "Editing", "https://kdenlive.org/", "Open-source editing fallback and clean master exports.", ""),
+)
+
+
+def image_root():
+    """Return the configured image directory or one beside the active database."""
+    return Path(IMAGE_ROOT_OVERRIDE) if IMAGE_ROOT_OVERRIDE else DB_PATH.parent / "images"
 
 
 def parse_trusted_proxy_networks(value):
@@ -138,6 +154,84 @@ def validate_display_name(display_name):
     )
 
 
+def validate_https_url(value):
+    """Accept only absolute HTTPS URLs with a network host."""
+    if not isinstance(value, str) or len(value) > 500:
+        return False
+    parsed = urlsplit(value.strip())
+    return parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username
+
+
+def detect_image_type(data):
+    """Return a MIME type only for structurally plausible supported images."""
+    if (
+        len(data) >= 45
+        and data.startswith(b"\x89PNG\r\n\x1a\n")
+        and int.from_bytes(data[8:12], "big") == 13
+        and data[12:16] == b"IHDR"
+        and int.from_bytes(data[16:20], "big") > 0
+        and int.from_bytes(data[20:24], "big") > 0
+        and data[-12:-8] == b"\x00\x00\x00\x00"
+        and data[-8:-4] == b"IEND"
+    ):
+        return "image/png"
+    if data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9"):
+        for marker in (b"\xff\xc0", b"\xff\xc1", b"\xff\xc2"):
+            offset = data.find(marker)
+            if offset >= 0 and offset + 9 <= len(data):
+                height = int.from_bytes(data[offset + 5 : offset + 7], "big")
+                width = int.from_bytes(data[offset + 7 : offset + 9], "big")
+                if width and height:
+                    return "image/jpeg"
+    if (
+        len(data) >= 20
+        and data[:4] == b"RIFF"
+        and data[8:12] == b"WEBP"
+        and int.from_bytes(data[4:8], "little") + 8 == len(data)
+        and data[12:16] in {b"VP8 ", b"VP8L", b"VP8X"}
+        and int.from_bytes(data[16:20], "little") <= len(data) - 20
+    ):
+        return "image/webp"
+    return ""
+
+
+def normalize_workspace_data(data):
+    """Add lifecycle and character IDs without replacing existing workspace IDs."""
+    if not isinstance(data, dict) or not isinstance(data.get("projects"), list):
+        return data, False
+    changed = False
+    for project in data["projects"]:
+        if not isinstance(project, dict):
+            continue
+        if "archived" not in project:
+            project["archived"] = False
+            changed = True
+        for episode in project.get("episodes", []):
+            if isinstance(episode, dict) and "archived" not in episode:
+                episode["archived"] = False
+                changed = True
+        for character in project.get("characters", []):
+            if not isinstance(character, dict):
+                continue
+            if not character.get("id"):
+                character["id"] = "c-" + secrets.token_hex(12)
+                changed = True
+            if "archived" not in character:
+                character["archived"] = False
+                changed = True
+    if data["projects"] and not any(
+        project.get("id") == data.get("activeId")
+        for project in data["projects"]
+        if isinstance(project, dict)
+    ):
+        data["activeId"] = data["projects"][0].get("id", "")
+        changed = True
+    if not data["projects"] and data.get("activeId"):
+        data["activeId"] = ""
+        changed = True
+    return data, changed
+
+
 def get_setting(database, key, default=None):
     """Read one application setting, returning a supplied default when absent."""
     row = database.execute(
@@ -204,15 +298,59 @@ def setup():
                 window_started INTEGER NOT NULL,
                 blocked_until INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS tools (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                url TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                archived_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS character_images (
+                storage_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                character_id TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(user_id, character_id)
+            );
+            CREATE INDEX IF NOT EXISTS character_images_user
+                ON character_images(user_id);
             """
         )
+        user_columns = {
+            row["name"] for row in database.execute("PRAGMA table_info(users)")
+        }
+        if "archived_at" not in user_columns:
+            database.execute("ALTER TABLE users ADD COLUMN archived_at INTEGER")
+        try:
+            previous_schema = int(get_setting(database, "schema_version", "0"))
+        except ValueError:
+            previous_schema = 0
+        if (
+            previous_schema < 3
+            and database.execute("SELECT COUNT(*) FROM tools").fetchone()[0] == 0
+        ):
+            now = int(time.time())
+            database.executemany(
+                """
+                INSERT INTO tools
+                    (name, category, url, purpose, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ((*tool, now, now) for tool in TOOL_SEEDS),
+            )
         if get_setting(database, "registration_enabled") is None:
             set_setting(
                 database,
                 "registration_enabled",
                 "1" if REGISTRATION_DEFAULT else "0",
             )
-        set_setting(database, "schema_version", "2")
+        set_setting(database, "schema_version", "3")
 
         admin = database.execute(
             "SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1"
@@ -263,6 +401,21 @@ def setup():
                 )
                 set_setting(database, "legacy_workspace_migrated", str(admin_id))
 
+        for row in database.execute(
+            "SELECT user_id, data FROM workspaces"
+        ).fetchall():
+            try:
+                data = json.loads(row["data"])
+            except json.JSONDecodeError:
+                continue
+            data, changed = normalize_workspace_data(data)
+            if changed:
+                database.execute(
+                    "UPDATE workspaces SET data=? WHERE user_id=?",
+                    (json.dumps(data), row["user_id"]),
+                )
+    image_root().mkdir(parents=True, exist_ok=True)
+
 
 def session_token_hash(token):
     """Hash a raw session token so a database disclosure cannot replay it."""
@@ -294,6 +447,7 @@ def public_user(row):
         "displayName": row["display_name"],
         "role": row["role"],
         "active": bool(row["is_active"]),
+        "archived": bool(row["archived_at"]),
         "theme": row["theme"],
     }
 
@@ -361,6 +515,16 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return value
 
+    def read_body(self, max_bytes):
+        """Read a bounded raw request body for authenticated image uploads."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as error:
+            raise ValueError("Invalid content length") from error
+        if length <= 0 or length > max_bytes:
+            raise ValueError("Invalid request size")
+        return self.rfile.read(length)
+
     def same_origin_request(self):
         """Reject browser state changes that explicitly originate off-site."""
         if self.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
@@ -396,14 +560,20 @@ class Handler(BaseHTTPRequestHandler):
                 """
                 SELECT
                     s.token_hash, s.csrf_token, s.expires_at,
-                    u.id, u.username, u.display_name, u.role, u.is_active, u.theme
+                    u.id, u.username, u.display_name, u.role, u.is_active,
+                    u.archived_at, u.theme
                 FROM sessions s
                 JOIN users u ON u.id=s.user_id
                 WHERE s.token_hash=?
                 """,
                 (session_token_hash(token),),
             ).fetchone()
-            if not row or not row["is_active"] or row["expires_at"] <= now:
+            if (
+                not row
+                or not row["is_active"]
+                or row["archived_at"]
+                or row["expires_at"] <= now
+            ):
                 if row:
                     database.execute(
                         "DELETE FROM sessions WHERE token_hash=?", (row["token_hash"],)
@@ -507,6 +677,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.get_workspace(session)
         if path == "/api/account":
             return self.json_reply(200, {"user": public_user(session)})
+        if path == "/api/tools":
+            return self.get_tools(session)
+        if path.startswith("/api/characters/") and path.endswith("/image"):
+            return self.get_character_image(path, session)
         if path == "/api/admin/users":
             return self.get_users()
         if path == "/api/admin/settings":
@@ -524,6 +698,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.login()
         if path == "/api/register":
             return self.register()
+        if path == "/api/admin/tools":
+            session = self.require_session(admin=True, csrf=True)
+            if not session:
+                return None
+            return self.create_tool()
         if path == "/api/logout":
             session = self.require_session(csrf=True)
             if not session:
@@ -557,7 +736,29 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/admin/settings":
             return self.update_admin_settings()
         if path.startswith("/api/admin/users/"):
-            return self.update_user(path)
+            return self.update_user(path, session)
+        if path.startswith("/api/admin/tools/"):
+            return self.update_tool(path)
+        if path.startswith("/api/characters/") and path.endswith("/image"):
+            return self.put_character_image(path, session)
+        return self.json_reply(404, {"error": "Not found"})
+
+    def do_DELETE(self):
+        """Route destructive actions with role and CSRF enforcement."""
+        if not self.same_origin_request():
+            return self.json_reply(403, {"error": "Cross-site request rejected."})
+        path = urlsplit(self.path).path
+        session = self.require_session(
+            admin=path.startswith("/api/admin/"), csrf=True
+        )
+        if not session:
+            return None
+        if path.startswith("/api/admin/users/"):
+            return self.delete_user(path, session)
+        if path.startswith("/api/admin/tools/"):
+            return self.delete_tool(path)
+        if path.startswith("/api/characters/") and path.endswith("/image"):
+            return self.delete_character_image(path, session)
         return self.json_reply(404, {"error": "Not found"})
 
     def login_client_address(self):
@@ -868,12 +1069,31 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT revision, data FROM workspaces WHERE user_id=?",
                 (session["id"],),
             ).fetchone()
-        value = (
-            {"revision": row["revision"], "data": json.loads(row["data"])}
-            if row
-            else {"revision": 0, "data": None}
+        if not row:
+            return self.json_reply(200, {"revision": 0, "data": None})
+        data, changed = normalize_workspace_data(json.loads(row["data"]))
+        if changed:
+            with connect() as database:
+                database.execute(
+                    "UPDATE workspaces SET data=? WHERE user_id=?",
+                    (json.dumps(data), session["id"]),
+                )
+        with connect() as database:
+            image_ids = [
+                item["character_id"]
+                for item in database.execute(
+                    "SELECT character_id FROM character_images WHERE user_id=?",
+                    (session["id"],),
+                ).fetchall()
+            ]
+        return self.json_reply(
+            200,
+            {
+                "revision": row["revision"],
+                "data": data,
+                "imageCharacterIds": image_ids,
+            },
         )
-        return self.json_reply(200, value)
 
     def put_workspace(self, session):
         """Save one user's validated workspace with optimistic conflict detection."""
@@ -885,7 +1105,6 @@ class Handler(BaseHTTPRequestHandler):
                 or revision < 0
                 or not isinstance(data, dict)
                 or not isinstance(data.get("projects"), list)
-                or not data["projects"]
             ):
                 raise ValueError("Invalid workspace")
             if not all(
@@ -897,8 +1116,25 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Invalid projects")
         except (ValueError, KeyError, TypeError):
             return self.json_reply(400, {"error": "Invalid workspace."})
+        data, _ = normalize_workspace_data(data)
+        character_ids = {
+            character.get("id")
+            for project in data["projects"]
+            for character in project.get("characters", [])
+            if isinstance(character, dict) and character.get("id")
+        }
+        removed_files = []
         with connect() as database:
             database.execute("BEGIN IMMEDIATE")
+            image_rows = database.execute(
+                "SELECT storage_id, character_id FROM character_images WHERE user_id=?",
+                (session["id"],),
+            ).fetchall()
+            removed_files = [
+                row["storage_id"]
+                for row in image_rows
+                if row["character_id"] not in character_ids
+            ]
             if revision == 0:
                 result = database.execute(
                     """
@@ -927,6 +1163,13 @@ class Handler(BaseHTTPRequestHandler):
                         )
                     },
                 )
+            if removed_files:
+                database.executemany(
+                    "DELETE FROM character_images WHERE storage_id=?",
+                    ((storage_id,) for storage_id in removed_files),
+                )
+        for storage_id in removed_files:
+            (image_root() / str(session["id"]) / storage_id).unlink(missing_ok=True)
         return self.json_reply(200, {"revision": revision + 1})
 
     def update_account(self, session):
@@ -1010,7 +1253,8 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as database:
             rows = database.execute(
                 """
-                SELECT id, username, display_name, role, is_active, theme, created_at
+                SELECT id, username, display_name, role, is_active,
+                       archived_at, theme, created_at
                 FROM users
                 ORDER BY created_at, id
                 """
@@ -1039,60 +1283,385 @@ class Handler(BaseHTTPRequestHandler):
             )
         return self.json_reply(200, {"registrationEnabled": enabled})
 
-    def update_user(self, path):
-        """Change a user's role or active state without removing the last admin."""
+    def active_admin_count(self, database):
+        """Count administrators who are active and not archived."""
+        return database.execute(
+            """
+            SELECT COUNT(*) FROM users
+            WHERE role='admin' AND is_active=1 AND archived_at IS NULL
+            """
+        ).fetchone()[0]
+
+    def update_user(self, path, session):
+        """Apply one explicit account lifecycle or role action."""
         try:
             user_id = int(path.rsplit("/", 1)[1])
-            value = self.read_json()
+            value = self.read_json(AUTH_MAX_BYTES)
         except (ValueError, IndexError):
             return self.json_reply(400, {"error": "Invalid user update."})
+        action = value.get("action")
         role = value.get("role")
-        active = value.get("active")
+        legacy_active = value.get("active")
         if (
-            not isinstance(role, str)
-            or role not in {"admin", "user"}
-            or type(active) is not bool
+            action is None
+            and isinstance(role, str)
+            and role in {"admin", "user"}
+            and type(legacy_active) is bool
         ):
-            return self.json_reply(400, {"error": "Invalid user update."})
+            action = "legacy"
+        if action not in {"disable", "archive", "restore", "role", "legacy"}:
+            return self.json_reply(400, {"error": "Choose a valid account action."})
+        if action in {"role", "legacy"} and (
+            not isinstance(role, str) or role not in {"admin", "user"}
+        ):
+            return self.json_reply(400, {"error": "Choose a valid role."})
+        if user_id == session["id"] and action in {"disable", "archive"}:
+            return self.json_reply(409, {"error": "You cannot disable or archive yourself."})
         with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
             target = database.execute(
                 "SELECT * FROM users WHERE id=?", (user_id,)
             ).fetchone()
             if not target:
                 return self.json_reply(404, {"error": "User not found."})
-            removes_active_admin = (
-                target["role"] == "admin"
-                and target["is_active"]
-                and (role != "admin" or not active)
+            removes_admin = target["role"] == "admin" and (
+                action in {"disable", "archive"}
+                or (action in {"role", "legacy"} and role != "admin")
+                or (action == "legacy" and not legacy_active)
             )
-            if removes_active_admin:
-                admin_count = database.execute(
-                    """
-                    SELECT COUNT(*) AS total
-                    FROM users
-                    WHERE role='admin' AND is_active=1
-                    """
-                ).fetchone()["total"]
-                if admin_count <= 1:
+            if removes_admin and target["is_active"] and not target["archived_at"]:
+                if self.active_admin_count(database) <= 1:
                     return self.json_reply(
                         409, {"error": "At least one active admin is required."}
                     )
-            database.execute(
-                """
-                UPDATE users
-                SET role=?, is_active=?, updated_at=?
-                WHERE id=?
-                """,
-                (role, 1 if active else 0, int(time.time()), user_id),
-            )
-            if not active:
+            now = int(time.time())
+            if action == "disable":
                 database.execute(
-                    "DELETE FROM sessions WHERE user_id=?", (user_id,)
+                    "UPDATE users SET is_active=0, updated_at=? WHERE id=?",
+                    (now, user_id),
                 )
+                database.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            elif action == "archive":
+                database.execute(
+                    """
+                    UPDATE users SET is_active=0, archived_at=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (now, now, user_id),
+                )
+                database.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            elif action == "restore":
+                database.execute(
+                    """
+                    UPDATE users SET is_active=1, archived_at=NULL, updated_at=?
+                    WHERE id=?
+                    """,
+                    (now, user_id),
+                )
+            elif action == "role":
+                database.execute(
+                    "UPDATE users SET role=?, updated_at=? WHERE id=?",
+                    (role, now, user_id),
+                )
+            else:
+                database.execute(
+                    """
+                    UPDATE users SET role=?, is_active=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (role, 1 if legacy_active else 0, now, user_id),
+                )
+                if not legacy_active:
+                    database.execute(
+                        "DELETE FROM sessions WHERE user_id=?", (user_id,)
+                    )
             updated = database.execute(
                 "SELECT * FROM users WHERE id=?", (user_id,)
             ).fetchone()
         return self.json_reply(200, {"user": public_user(updated)})
+
+    def delete_user(self, path, session):
+        """Permanently remove one account and its cascaded private records."""
+        try:
+            user_id = int(path.rsplit("/", 1)[1])
+        except (ValueError, IndexError):
+            return self.json_reply(400, {"error": "Invalid user."})
+        if user_id == session["id"]:
+            return self.json_reply(409, {"error": "You cannot delete yourself."})
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            target = database.execute(
+                "SELECT * FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+            if not target:
+                return self.json_reply(404, {"error": "User not found."})
+            if (
+                target["role"] == "admin"
+                and target["is_active"]
+                and not target["archived_at"]
+                and self.active_admin_count(database) <= 1
+            ):
+                return self.json_reply(
+                    409, {"error": "At least one active admin is required."}
+                )
+            database.execute("DELETE FROM users WHERE id=?", (user_id,))
+        shutil.rmtree(image_root() / str(user_id), ignore_errors=True)
+        return self.json_reply(200, {"ok": True})
+
+    def tool_payload(self):
+        """Validate and normalize an administrator-supplied catalog record."""
+        value = self.read_json(AUTH_MAX_BYTES)
+        fields = {
+            key: value.get(key, "")
+            for key in ("name", "category", "url", "purpose", "notes")
+        }
+        if not all(isinstance(item, str) for item in fields.values()):
+            raise ValueError("Invalid tool fields")
+        fields = {key: item.strip() for key, item in fields.items()}
+        if (
+            not fields["name"]
+            or len(fields["name"]) > 100
+            or not fields["category"]
+            or len(fields["category"]) > 60
+            or not fields["purpose"]
+            or len(fields["purpose"]) > 300
+            or len(fields["notes"]) > 500
+            or not validate_https_url(fields["url"])
+        ):
+            raise ValueError("Invalid tool fields")
+        return fields
+
+    @staticmethod
+    def serialize_tool(row):
+        """Serialize a catalog record without exposing storage details."""
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "category": row["category"],
+            "url": row["url"],
+            "purpose": row["purpose"],
+            "notes": row["notes"],
+            "archived": bool(row["archived_at"]),
+        }
+
+    def get_tools(self, session):
+        """List active tools for members and archived tools for administrators."""
+        with connect() as database:
+            if session["role"] == "admin":
+                rows = database.execute(
+                    "SELECT * FROM tools ORDER BY category, name, id"
+                ).fetchall()
+            else:
+                rows = database.execute(
+                    """
+                    SELECT * FROM tools WHERE archived_at IS NULL
+                    ORDER BY category, name, id
+                    """
+                ).fetchall()
+        return self.json_reply(200, {"tools": [self.serialize_tool(row) for row in rows]})
+
+    def create_tool(self):
+        """Add a validated shared tool catalog record."""
+        try:
+            value = self.tool_payload()
+        except ValueError:
+            return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
+        now = int(time.time())
+        with connect() as database:
+            cursor = database.execute(
+                """
+                INSERT INTO tools
+                    (name, category, url, purpose, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*value.values(), now, now),
+            )
+            row = database.execute(
+                "SELECT * FROM tools WHERE id=?", (cursor.lastrowid,)
+            ).fetchone()
+        return self.json_reply(201, {"tool": self.serialize_tool(row)})
+
+    def update_tool(self, path):
+        """Edit, archive, or restore a shared catalog record."""
+        try:
+            tool_id = int(path.rsplit("/", 1)[1])
+            value = self.read_json(AUTH_MAX_BYTES)
+        except (ValueError, IndexError):
+            return self.json_reply(400, {"error": "Invalid tool update."})
+        action = value.get("action", "edit")
+        with connect() as database:
+            if not database.execute("SELECT 1 FROM tools WHERE id=?", (tool_id,)).fetchone():
+                return self.json_reply(404, {"error": "Tool not found."})
+            now = int(time.time())
+            if action in {"archive", "restore"}:
+                database.execute(
+                    "UPDATE tools SET archived_at=?, updated_at=? WHERE id=?",
+                    (now if action == "archive" else None, now, tool_id),
+                )
+            elif action == "edit":
+                try:
+                    fields = self.tool_payload_from_value(value)
+                except ValueError:
+                    return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
+                database.execute(
+                    """
+                    UPDATE tools SET name=?, category=?, url=?, purpose=?, notes=?,
+                        updated_at=? WHERE id=?
+                    """,
+                    (*fields.values(), now, tool_id),
+                )
+            else:
+                return self.json_reply(400, {"error": "Choose a valid tool action."})
+            row = database.execute("SELECT * FROM tools WHERE id=?", (tool_id,)).fetchone()
+        return self.json_reply(200, {"tool": self.serialize_tool(row)})
+
+    def tool_payload_from_value(self, value):
+        """Validate a decoded catalog payload used by update requests."""
+        fields = {key: value.get(key, "") for key in ("name", "category", "url", "purpose", "notes")}
+        if not all(isinstance(item, str) for item in fields.values()):
+            raise ValueError("Invalid tool fields")
+        fields = {key: item.strip() for key, item in fields.items()}
+        if (not fields["name"] or len(fields["name"]) > 100 or not fields["category"]
+                or len(fields["category"]) > 60 or not fields["purpose"]
+                or len(fields["purpose"]) > 300 or len(fields["notes"]) > 500
+                or not validate_https_url(fields["url"])):
+            raise ValueError("Invalid tool fields")
+        return fields
+
+    def delete_tool(self, path):
+        """Permanently delete one catalog record."""
+        try:
+            tool_id = int(path.rsplit("/", 1)[1])
+        except (ValueError, IndexError):
+            return self.json_reply(400, {"error": "Invalid tool."})
+        with connect() as database:
+            result = database.execute("DELETE FROM tools WHERE id=?", (tool_id,))
+        if result.rowcount != 1:
+            return self.json_reply(404, {"error": "Tool not found."})
+        return self.json_reply(200, {"ok": True})
+
+    def character_id_from_path(self, path):
+        """Extract a conservative character identifier from an image route."""
+        parts = path.strip("/").split("/")
+        if len(parts) != 4 or parts[:2] != ["api", "characters"] or parts[3] != "image":
+            raise ValueError("Invalid image path")
+        character_id = parts[2]
+        if not IDENTIFIER_PATTERN.fullmatch(character_id):
+            raise ValueError("Invalid character id")
+        return character_id
+
+    def user_has_character(self, database, user_id, character_id):
+        """Confirm that a character identifier belongs to one user's workspace."""
+        row = database.execute(
+            "SELECT data FROM workspaces WHERE user_id=?", (user_id,)
+        ).fetchone()
+        if not row:
+            return False
+        try:
+            data = json.loads(row["data"])
+        except json.JSONDecodeError:
+            return False
+        return any(
+            character.get("id") == character_id
+            for project in data.get("projects", []) if isinstance(project, dict)
+            for character in project.get("characters", []) if isinstance(character, dict)
+        )
+
+    def get_character_image(self, path, session):
+        """Return a private character image only to its owning account."""
+        try:
+            character_id = self.character_id_from_path(path)
+        except ValueError:
+            return self.json_reply(404, {"error": "Image not found."})
+        with connect() as database:
+            row = database.execute(
+                """
+                SELECT storage_id, mime_type FROM character_images
+                WHERE user_id=? AND character_id=?
+                """,
+                (session["id"], character_id),
+            ).fetchone()
+        if not row:
+            return self.json_reply(404, {"error": "Image not found."})
+        location = image_root() / str(session["id"]) / row["storage_id"]
+        try:
+            data = location.read_bytes()
+        except FileNotFoundError:
+            return self.json_reply(404, {"error": "Image not found."})
+        return self.reply(200, data, row["mime_type"], {"Cache-Control": "private, no-store"})
+
+    def put_character_image(self, path, session):
+        """Validate and replace one private character reference image."""
+        try:
+            character_id = self.character_id_from_path(path)
+            data = self.read_body(MAX_IMAGE_BYTES)
+        except ValueError:
+            return self.json_reply(400, {"error": "Choose an image up to 5 MB."})
+        mime_type = detect_image_type(data)
+        if not mime_type:
+            return self.json_reply(400, {"error": "Use an actual PNG, JPEG, or WebP image."})
+        storage_id = secrets.token_hex(24)
+        directory = image_root() / str(session["id"])
+        directory.mkdir(parents=True, exist_ok=True)
+        location = directory / storage_id
+        location.write_bytes(data)
+        old_storage_id = None
+        try:
+            with connect() as database:
+                database.execute("BEGIN IMMEDIATE")
+                if not self.user_has_character(database, session["id"], character_id):
+                    location.unlink(missing_ok=True)
+                    return self.json_reply(404, {"error": "Character not found."})
+                old = database.execute(
+                    """
+                    SELECT storage_id FROM character_images
+                    WHERE user_id=? AND character_id=?
+                    """,
+                    (session["id"], character_id),
+                ).fetchone()
+                old_storage_id = old["storage_id"] if old else None
+                database.execute(
+                    """
+                    INSERT INTO character_images
+                        (storage_id, user_id, character_id, mime_type, byte_size, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, character_id) DO UPDATE SET
+                        storage_id=excluded.storage_id,
+                        mime_type=excluded.mime_type,
+                        byte_size=excluded.byte_size,
+                        created_at=excluded.created_at
+                    """,
+                    (storage_id, session["id"], character_id, mime_type, len(data), int(time.time())),
+                )
+        except Exception:
+            location.unlink(missing_ok=True)
+            raise
+        if old_storage_id:
+            (directory / old_storage_id).unlink(missing_ok=True)
+        return self.json_reply(200, {"ok": True, "imageUrl": path})
+
+    def delete_character_image(self, path, session):
+        """Remove one private image record and its stored bytes."""
+        try:
+            character_id = self.character_id_from_path(path)
+        except ValueError:
+            return self.json_reply(400, {"error": "Invalid character image."})
+        with connect() as database:
+            row = database.execute(
+                """
+                SELECT storage_id FROM character_images
+                WHERE user_id=? AND character_id=?
+                """,
+                (session["id"], character_id),
+            ).fetchone()
+            if not row:
+                return self.json_reply(404, {"error": "Image not found."})
+            database.execute(
+                "DELETE FROM character_images WHERE user_id=? AND character_id=?",
+                (session["id"], character_id),
+            )
+        (image_root() / str(session["id"]) / row["storage_id"]).unlink(missing_ok=True)
+        return self.json_reply(200, {"ok": True})
 
 
 if __name__ == "__main__":

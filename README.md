@@ -1,6 +1,6 @@
 # AI Content Studio
 
-AI Content Studio is a self-hosted project, episode, and character dashboard. It runs as one Python standard-library service with a SQLite database on a persistent Docker volume.
+AI Content Studio is a self-hosted project, episode, and character dashboard. It runs as one Python standard-library service with a SQLite database and private character images on a persistent Docker volume.
 
 Each account has a private workspace. Administrators manage user access and decide whether regular-user registration is open. New registrations can never request an administrator role.
 
@@ -33,7 +33,7 @@ Production belongs on the separate AI server. The coding VPS is only for develop
 10. Remove the bootstrap password from `.env` after the administrator exists, then recreate the container.
 11. Enable registration in Admin only when new regular users should be accepted.
 
-SQLite lives in `studio_data` at `/data/studio.sqlite3`. Never run `docker compose down -v` unless permanent deletion is intentional.
+SQLite and private images live in `studio_data` at `/data/studio.sqlite3` and `/data/images`. Never run `docker compose down -v` unless permanent deletion is intentional.
 
 The application version is maintained once in `APP_VERSION` in `server.py` and returned to both footers through `/api/session`.
 
@@ -45,7 +45,8 @@ Back up SQLite first. On the first start of this version:
 2. It creates the initial admin from the new admin environment settings. Legacy `AICS_USERNAME` and `AICS_PASSWORD` names remain an upgrade fallback.
 3. It copies the existing `workspace` row to the initial admin with the same revision and JSON.
 4. It leaves the legacy table unchanged for rollback inspection.
-5. It keeps registration disabled unless an admin explicitly enables it.
+5. It adds account lifecycle fields, migrates the shared tool list into SQLite, gives legacy characters stable IDs and archive flags, and creates private image metadata without changing existing project IDs or workspace revisions.
+6. It keeps registration disabled unless an admin explicitly enables it.
 
 The copy uses `INSERT OR IGNORE`, so restarts cannot overwrite newer admin data. Verify projects, episodes, characters, and revision conflicts after upgrading. See [DEPLOYMENT.md](DEPLOYMENT.md).
 
@@ -53,15 +54,21 @@ The copy uses `INSERT OR IGNORE`, so restarts cannot overwrite newer admin data.
 
 The Account view changes display name, password, and saved theme. Password changes sign out all sessions.
 
-The Admin view opens or closes registration, changes roles, and disables access without deleting workspace data. Registration always creates a regular user and stops when `AICS_MAX_USERS` is reached. Enabled registration is also limited per source by `AICS_REGISTRATION_ATTEMPT_LIMIT`. Regular users cannot access Admin or promote themselves. The final active admin cannot be demoted or disabled.
+The Admin view opens or closes registration, changes roles, and can disable, archive, restore, or permanently delete accounts. Disable and archive retain workspace data and revoke sessions. Permanent deletion is explicit, cannot target the signed-in administrator or the last active administrator, and removes only that account, its workspace, sessions, and uploaded assets. Registration always creates a regular user and stops when `AICS_MAX_USERS` is reached. Enabled registration is also limited per source by `AICS_REGISTRATION_ATTEMPT_LIMIT`. Regular users cannot access Admin or promote themselves. The final active admin cannot be demoted or disabled.
 
 Login throttling is source-based and covers attempts across changing usernames. Each attempt is reserved in an atomic SQLite write transaction before password verification, so concurrent requests cannot pass the limit together. Once blocked, a source receives 429 before any password verification. Forwarding headers are ignored unless the immediate peer matches `AICS_TRUSTED_PROXY_NETWORKS`. A shared tunnel peer will otherwise share one source limit, so the production proxy trust boundary must be configured from the separately inspected AI server network. Local tests simulate trusted and untrusted peers; they do not verify a live Cloudflare Tunnel.
 
 Sessions expire at a fixed time after login. `AICS_SESSION_HOURS` defaults to 12. An expired session returns to login. Export backups regularly.
 
+## Workspace lifecycle and imports
+
+Projects, episodes, and characters can be archived, restored, or permanently deleted. Archived records remain in their filtered views and do not count as active dashboard items. Deleting a project also removes its episodes, characters, and associated image files. An empty workspace is supported.
+
+The shared Tools catalog is stored in SQLite. Administrators can add, edit, archive, restore, and delete catalog records. Regular users have read-only access to active tools.
+
 ## Import browser-only records
 
-Export JSON from the same browser profile that holds the old Sites records. Sign in to the intended account here, choose **Import JSON**, and confirm replacement. Import affects only that account but replaces its entire workspace.
+Export JSON from the same browser profile that holds the old Sites records. Sign in to the intended account here, choose **Import JSON**, and confirm replacement. Import affects only that account but replaces its entire text workspace. It does not import images. Existing images for characters no longer present after import are removed.
 
 ## Backup
 
@@ -72,7 +79,7 @@ docker compose exec -T studio python -c "import sqlite3; src=sqlite3.connect('/d
 docker compose cp studio:/data/studio-backup.sqlite3 ./studio-backup.sqlite3
 ```
 
-Store backups off-server as sensitive data. JSON export is a per-user portable backup, not a full database backup.
+Store backups off-server as sensitive data. JSON export is a per-user text-only transfer and does not contain uploaded images. A complete backup must include the SQLite database and the `/data/images` directory. The named Docker volume contains both. Restore both together to round-trip character images.
 
 ## Local development
 
@@ -103,6 +110,6 @@ A missing tool is unverified, not passed.
 
 ## Scope and release
 
-The app does not upload media, send password-reset email, provide MFA or external identity, delete users, or publish to social platforms.
+The app accepts private PNG, JPEG, and WebP character reference images up to 5 MB. It does not send password-reset email, provide MFA or external identity, or publish to social platforms.
 
 Keep `.env`, SQLite files, exports, backups, logs, and real media out of Git. Before a public release, complete [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md), choose a license, inspect history, and review repository settings.
