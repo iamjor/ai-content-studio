@@ -252,6 +252,12 @@ p {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
   min-height: calc(100vh - 58px);
+  background: linear-gradient(
+    to right,
+    var(--surface) 0 259px,
+    var(--border) 259px 260px,
+    var(--bg) 260px
+  );
 }
 
 .side {
@@ -260,6 +266,7 @@ p {
   display: flex;
   min-width: 0;
   height: 100vh;
+  height: 100dvh;
   flex-direction: column;
   gap: 24px;
   overflow-y: auto;
@@ -301,12 +308,20 @@ p {
   color: var(--text);
 }
 
-.nav .n {
-  width: 30px;
+.nav-icon {
+  width: 22px;
+  height: 22px;
   flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav button:hover .nav-icon,
+.nav button.active .nav-icon {
   color: var(--accent);
-  font-size: 0.75rem;
-  font-weight: 800;
 }
 
 .sidefoot {
@@ -951,12 +966,15 @@ p {
   }
 
   .side {
-    position: relative;
+    position: sticky;
+    top: 0;
     z-index: 5;
     width: 100%;
     height: auto;
     gap: 13px;
-    overflow: visible;
+    max-height: 100dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border-right: 0;
     border-bottom: 1px solid var(--border);
     padding: 14px clamp(16px, 4vw, 34px);
@@ -1226,18 +1244,34 @@ p {
 }
 
 .site-footer {
-  flex-direction: column;
+  flex-direction: row;
   justify-content: center;
-  gap: 5px;
+  gap: 0;
   text-align: center;
+}
+
+.footer-line {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.42em;
+  white-space: nowrap;
+  font-size: clamp(0.64rem, 2.75vw, 0.76rem);
+  letter-spacing: -0.01em;
 }
 
 .shell.sidebar-closed {
   grid-template-columns: 78px minmax(0, 1fr);
+  background: linear-gradient(
+    to right,
+    var(--surface) 0 77px,
+    var(--border) 77px 78px,
+    var(--bg) 78px
+  );
 }
 
-.shell.sidebar-closed .brand div,
-.shell.sidebar-closed .nav button span:not(.n),
+.shell.sidebar-closed .nav-label,
 .shell.sidebar-closed .sidefoot {
   display: none;
 }
@@ -1255,18 +1289,16 @@ p {
 }
 
 @media (max-width: 1080px) {
+  .shell,
   .shell.sidebar-closed {
     grid-template-columns: 1fr;
+    background: var(--bg);
   }
 
   .side {
     max-height: 100dvh;
     overflow-y: auto;
     overscroll-behavior: contain;
-  }
-
-  .shell.sidebar-closed .brand div {
-    display: block;
   }
 
   .shell.sidebar-closed .side-top {
