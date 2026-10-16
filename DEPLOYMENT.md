@@ -23,6 +23,8 @@ Every item below requires separately authorized AI server access.
 - [ ] **AI server access required:** record deployed and target commits.
 - [ ] **AI server access required:** inspect Docker, Compose, containers, networks, volumes, and port conflicts without changing them.
 - [ ] **AI server access required:** inspect the HTTPS proxy or tunnel privately and confirm it preserves the public Host header.
+- [ ] **AI server access required:** identify the app's immediate proxy peer and set `AICS_TRUSTED_PROXY_NETWORKS` only if verified client-address throttling is required.
+- [ ] **AI server access required:** set a finite `AICS_MAX_USERS` appropriate for the installation.
 - [ ] **AI server access required:** keep the app loopback-only or on a private container network.
 - [ ] **AI server access required:** confirm disk space and an off-server backup destination.
 - [ ] **AI server access required:** keep registration off and Secure cookies on.
@@ -53,7 +55,8 @@ These steps require explicit approval after review and merge.
 - [ ] **AI server access required:** check Compose status and `/healthz`.
 - [ ] **AI server access required:** confirm plain HTTP is not public and HTTPS is valid.
 - [ ] **AI server access required:** verify the in-app login replaces the browser Basic Auth dialog.
-- [ ] **AI server access required:** verify login throttling and rejected unauthenticated API access.
+- [ ] **AI server access required:** verify login throttling, owner access after shared-peer failures, ignored headers from untrusted peers, and rejected unauthenticated API access.
+- [ ] **AI server access required:** verify HTTPS Origin matches the preserved public Host and the session cookie is Secure, HttpOnly, and SameSite Strict in the deployed browser.
 - [ ] **AI server access required:** verify migrated owner data and revision.
 - [ ] **AI server access required:** test logout, expiry, CSRF, account changes, and reauthentication.
 - [ ] **AI server access required:** confirm registration is off unless intentionally opened.

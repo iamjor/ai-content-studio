@@ -151,6 +151,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 "AICS_COOKIE_SECURE": "1",
                 "AICS_DB_PATH": str(cls.database_path),
                 "AICS_REGISTRATION_ENABLED": "0",
+                "AICS_MAX_USERS": "8",
                 "AICS_SESSION_HOURS": "12",
                 "PORT": str(cls.port),
             }
@@ -473,23 +474,151 @@ class ServerIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(client.request("/api/session")[1]["authenticated"], False)
 
-    def test_08_login_throttling(self):
-        """Lock repeated failures without logging or exposing whether a user exists."""
+    def test_08_malformed_auth_and_account_json(self):
+        """Return controlled errors for non-string auth and account fields."""
+        self.set_registration(True)
+        malformed_registrations = (
+            {
+                "username": [],
+                "displayName": "List User",
+                "password": "valid-password-123",
+            },
+            {
+                "username": "dictname",
+                "displayName": {},
+                "password": "valid-password-123",
+            },
+            {"username": "dictpass", "displayName": "Dict Pass", "password": {}},
+        )
+        for payload in malformed_registrations:
+            status, _, _ = TestClient(self.base_url).request(
+                "/api/register", method="POST", payload=payload
+            )
+            self.assertEqual(status, 400)
+
+        admin = self.admin_client()
+        malformed_updates = (
+            {"displayName": {}},
+            {"theme": []},
+            {"currentPassword": [], "newPassword": "valid-password-123"},
+            {"currentPassword": ADMIN_PASSWORD, "newPassword": {}},
+        )
+        for payload in malformed_updates:
+            status, _, _ = admin.request(
+                "/api/account", method="PUT", payload=payload
+            )
+            self.assertEqual(status, 400)
+
+        status, users, _ = admin.request("/api/admin/users")
+        self.assertEqual(status, 200)
+        owner = next(user for user in users["users"] if user["role"] == "admin")
+        status, _, _ = admin.request(
+            "/api/admin/users/" + str(owner["id"]),
+            method="PUT",
+            payload={"role": [], "active": True},
+        )
+        self.assertEqual(status, 400)
+
+    def test_09_registration_account_limit(self):
+        """Stop public registration at the configured total account limit."""
+        self.set_registration(True)
+        allowed = TestClient(self.base_url)
+        status, _, _ = allowed.register(
+            "limituser", "Limit User", "limit-user-password"
+        )
+        self.assertEqual(status, 201)
+
+        rejected = TestClient(self.base_url)
+        status, payload, _ = rejected.register(
+            "overflowuser", "Overflow User", "overflow-user-password"
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("limit", payload["error"].lower())
+
+    def test_10_https_proxy_origin_and_secure_cookie_contract(self):
+        """Simulate preserved public Host and HTTPS Origin headers locally."""
+        proxy_headers = {
+            "Host": "studio.example.test",
+            "Origin": "https://studio.example.test",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        proxy_client = TestClient(self.base_url)
+        status, _, headers = proxy_client.request(
+            "/api/login",
+            method="POST",
+            payload={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+            extra_headers=proxy_headers,
+        )
+        self.assertEqual(status, 200)
+        cookie = headers.get("Set-Cookie", "")
+        self.assertIn("Secure", cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=Strict", cookie)
+
+        rejected = TestClient(self.base_url)
+        status, _, _ = rejected.request(
+            "/api/login",
+            method="POST",
+            payload={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+            extra_headers={
+                "Host": "studio.example.test",
+                "Origin": "https://different.example.test",
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
+        self.assertEqual(status, 403)
+
+    def test_11_login_throttling(self):
+        """Throttle username cycling without letting failures lock out the owner."""
+        with sqlite3.connect(self.database_path) as database:
+            database.execute("DELETE FROM login_attempts")
+
         client = TestClient(self.base_url)
         statuses = []
-        for _ in range(5):
-            statuses.append(
-                client.login("throttle-target", "incorrect-password")[0]
+        for attempt in range(5):
+            status, _, _ = client.request(
+                "/api/login",
+                method="POST",
+                payload={
+                    "username": "changing-" + str(attempt),
+                    "password": "incorrect-password",
+                },
+                extra_headers={
+                    "CF-Connecting-IP": "198.51.100." + str(attempt + 1)
+                },
             )
+            statuses.append(status)
         self.assertEqual(statuses[-1], 429)
-        status, payload, headers = client.login(
-            "throttle-target", "incorrect-password"
+
+        status, payload, headers = client.request(
+            "/api/login",
+            method="POST",
+            payload={"username": "another-name", "password": "incorrect-password"},
+            extra_headers={"CF-Connecting-IP": "203.0.113.99"},
         )
         self.assertEqual(status, 429)
         self.assertIn("later", payload["error"].lower())
         self.assertIsNotNone(headers.get("Retry-After"))
 
-    def test_09_frontend_contract(self):
+        for _ in range(5):
+            client.login(ADMIN_USERNAME, "incorrect-password")
+        status, payload, _ = client.login(ADMIN_USERNAME, ADMIN_PASSWORD)
+        self.assertEqual(status, 200, payload)
+
+        self.assertEqual(
+            TestClient(self.base_url).login("x" * 41, "incorrect-password")[0],
+            400,
+        )
+        self.assertEqual(
+            TestClient(self.base_url).login("bounded", "x" * 257)[0],
+            400,
+        )
+        self.assertEqual(
+            TestClient(self.base_url).login("bounded", "x" * 5_000)[0],
+            400,
+        )
+
+    def test_12_frontend_contract(self):
         """Keep responsive, themed, versioned, and attributed shell requirements."""
         client = TestClient(self.base_url)
         html = client.request("/")[1]
@@ -502,6 +631,8 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn('id="loginThemeToggle"', html)
         self.assertIn('id="themeToggle"', html)
         self.assertIn("https://www.jomaroliverreyes.com/", html)
+        self.assertIn(">Developed by JOR</a>", html)
+        self.assertNotIn("Jomar Oliver Reyes</a>", html)
         self.assertIn('id="footerVersion"', html)
         self.assertNotIn("0.2.0", html)
         self.assertNotIn("0.2.0", script)

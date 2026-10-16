@@ -10,7 +10,8 @@ Each account has a private workspace. Administrators manage user access and deci
 - Passwords are salted and hashed with PBKDF2-SHA256.
 - Sessions are stored server-side. Cookies are HttpOnly, SameSite Strict, and Secure by default.
 - State-changing requests require a per-session CSRF token and same-origin browser context.
-- Repeated login failures are throttled.
+- Repeated login failures are throttled by source and known account. Correct credentials remain usable after bad attempts, so a shared tunnel address cannot lock out the owner.
+- Login and account request bodies are small and size-limited. Total accounts default to a configurable limit of 100.
 - Password changes revoke every session for that account.
 - Compose binds the container port to `127.0.0.1`.
 
@@ -23,13 +24,14 @@ Production belongs on the separate AI server. The coding VPS is only for develop
 1. Clone the reviewed repository on the AI server.
 2. Copy `.env.example` to `.env`.
 3. Set a unique admin username, display name, and password of at least 12 characters.
-4. Leave registration disabled for the first start.
+4. Leave registration disabled for the first start and set `AICS_MAX_USERS` to an appropriate finite limit.
 5. Keep `AICS_COOKIE_SECURE=1`, place the service behind HTTPS, and preserve the public Host header through the proxy.
-6. Run `docker compose up -d --build`.
-7. Check `docker compose ps` and `curl http://127.0.0.1:8787/healthz` on the AI server.
-8. Sign in through the HTTPS URL and verify the workspace.
-9. Remove the bootstrap password from `.env` after the administrator exists, then recreate the container.
-10. Enable registration in Admin only when new regular users should be accepted.
+6. Leave `AICS_TRUSTED_PROXY_NETWORKS` empty unless the direct peer is a proxy you administer. If set, use only verified peer CIDRs. The app accepts `CF-Connecting-IP` only from those peers.
+7. Run `docker compose up -d --build`.
+8. Check `docker compose ps` and `curl http://127.0.0.1:8787/healthz` on the AI server.
+9. Sign in through the HTTPS URL and verify the workspace.
+10. Remove the bootstrap password from `.env` after the administrator exists, then recreate the container.
+11. Enable registration in Admin only when new regular users should be accepted.
 
 SQLite lives in `studio_data` at `/data/studio.sqlite3`. Never run `docker compose down -v` unless permanent deletion is intentional.
 
@@ -51,7 +53,9 @@ The copy uses `INSERT OR IGNORE`, so restarts cannot overwrite newer admin data.
 
 The Account view changes display name, password, and saved theme. Password changes sign out all sessions.
 
-The Admin view opens or closes registration, changes roles, and disables access without deleting workspace data. Registration always creates a regular user. Regular users cannot access Admin or promote themselves. The final active admin cannot be demoted or disabled.
+The Admin view opens or closes registration, changes roles, and disables access without deleting workspace data. Registration always creates a regular user and stops when `AICS_MAX_USERS` is reached. Regular users cannot access Admin or promote themselves. The final active admin cannot be demoted or disabled.
+
+Login throttling combines the direct client address with a known-account scope. Attempts against changing usernames still share the client-address limit. Valid credentials bypass existing failure state and clear it, which avoids owner lockout when a Cloudflare Tunnel presents several visitors through one peer. Forwarding headers are ignored unless the immediate peer matches `AICS_TRUSTED_PROXY_NETWORKS`. Configure that list only after inspecting the separate AI server network, and never trust a public-facing peer range merely because it sends forwarding headers.
 
 Sessions expire at a fixed time after login. `AICS_SESSION_HOURS` defaults to 12. An expired session returns to login. Export backups regularly.
 

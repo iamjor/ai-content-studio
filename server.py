@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -19,10 +20,13 @@ ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT / "dist"
 DB_PATH = Path(os.environ.get("AICS_DB_PATH", "/data/studio.sqlite3"))
 MAX_BYTES = 2_000_000
+AUTH_MAX_BYTES = 4_096
 PASSWORD_ITERATIONS = 600_000
 LOGIN_LIMIT = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_LOCK_SECONDS = 15 * 60
+LOGIN_SCOPE_LIMIT = 4_096
+MAX_USERS = max(1, int(os.environ.get("AICS_MAX_USERS", "100")))
 SESSION_SECONDS = int(
     os.environ.get(
         "AICS_SESSION_SECONDS",
@@ -47,6 +51,27 @@ ADMIN_DISPLAY_NAME = os.environ.get(
     "AICS_ADMIN_DISPLAY_NAME", ADMIN_USERNAME or "Studio owner"
 ).strip()
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,40}$")
+
+
+def parse_trusted_proxy_networks(value):
+    """Parse explicitly trusted proxy CIDRs or fail closed on bad configuration."""
+    networks = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError as error:
+            raise RuntimeError(
+                "AICS_TRUSTED_PROXY_NETWORKS contains an invalid network"
+            ) from error
+    return tuple(networks)
+
+
+TRUSTED_PROXY_NETWORKS = parse_trusted_proxy_networks(
+    os.environ.get("AICS_TRUSTED_PROXY_NETWORKS", "")
+)
 
 
 def connect():
@@ -317,13 +342,13 @@ class Handler(BaseHTTPRequestHandler):
         """Encode and send one JSON response."""
         self.reply(status, json.dumps(value).encode("utf-8"), extra=extra)
 
-    def read_json(self):
+    def read_json(self, max_bytes=MAX_BYTES):
         """Read a size-limited JSON object or raise ValueError for invalid input."""
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as error:
             raise ValueError("Invalid content length") from error
-        if length <= 0 or length > MAX_BYTES:
+        if length <= 0 or length > max_bytes:
             raise ValueError("Invalid request size")
         try:
             value = json.loads(self.rfile.read(length))
@@ -532,10 +557,31 @@ class Handler(BaseHTTPRequestHandler):
             return self.update_user(path)
         return self.json_reply(404, {"error": "Not found"})
 
-    def login_scope(self, username):
-        """Hash remote address and username for privacy-preserving throttling."""
-        value = f"{self.client_address[0]}|{username.lower()}"
-        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    def login_client_address(self):
+        """Return a safe login source, honoring Cloudflare only from trusted peers."""
+        peer_text = self.client_address[0]
+        try:
+            peer = ipaddress.ip_address(peer_text)
+        except ValueError:
+            return peer_text
+        if any(peer in network for network in TRUSTED_PROXY_NETWORKS):
+            forwarded_text = self.headers.get("CF-Connecting-IP", "").strip()
+            try:
+                return ipaddress.ip_address(forwarded_text).compressed
+            except ValueError:
+                pass
+        return peer.compressed
+
+    def login_scopes(self, username):
+        """Hash source and account dimensions without retaining identifying values."""
+        values = (
+            "source\0" + self.login_client_address(),
+            "account\0" + username.casefold(),
+        )
+        return tuple(
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in values
+        )
 
     def login_blocked(self, database, scope, now):
         """Return remaining lock seconds, clearing an expired attempt window."""
@@ -578,48 +624,83 @@ class Handler(BaseHTTPRequestHandler):
         )
         return max(0, blocked_until - now)
 
+    def prune_login_attempts(self, database, now):
+        """Expire stale throttle scopes and cap storage created by changing inputs."""
+        database.execute(
+            """
+            DELETE FROM login_attempts
+            WHERE blocked_until<=? AND window_started<?
+            """,
+            (now, now - LOGIN_WINDOW_SECONDS),
+        )
+        database.execute(
+            """
+            DELETE FROM login_attempts
+            WHERE scope_hash IN (
+                SELECT scope_hash FROM login_attempts
+                ORDER BY
+                    blocked_until DESC, failures DESC,
+                    window_started DESC, scope_hash
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (LOGIN_SCOPE_LIMIT,),
+        )
+
     def login(self):
         """Authenticate credentials, enforce throttling, and issue a session cookie."""
         try:
-            value = self.read_json()
+            value = self.read_json(AUTH_MAX_BYTES)
         except ValueError:
             return self.json_reply(400, {"error": "Enter a username and password."})
         username = value.get("username", "")
         password = value.get("password", "")
-        if not isinstance(username, str) or not isinstance(password, str):
+        if (
+            not isinstance(username, str)
+            or not isinstance(password, str)
+            or not username
+            or len(username) > 40
+            or not password
+            or len(password) > 256
+        ):
             return self.json_reply(400, {"error": "Enter a username and password."})
-        scope = self.login_scope(username)
+        scopes = self.login_scopes(username)
         now = int(time.time())
         with connect() as database:
-            remaining = self.login_blocked(database, scope, now)
-            if remaining:
-                return self.json_reply(
-                    429,
-                    {"error": "Too many attempts. Try again later."},
-                    {"Retry-After": str(remaining)},
-                )
+            self.prune_login_attempts(database, now)
             user = database.execute(
                 "SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)
             ).fetchone()
+            active_scopes = scopes if user else scopes[:1]
+            remaining = max(
+                self.login_blocked(database, scope, now)
+                for scope in active_scopes
+            )
             encoded = user["password_hash"] if user else DUMMY_PASSWORD_HASH
             password_matches = verify_password(password, encoded)
             valid = bool(user and user["is_active"] and password_matches)
             if not valid:
-                lock_seconds = self.record_login_failure(
-                    database, scope, now
+                lock_seconds = max(
+                    self.record_login_failure(database, scope, now)
+                    for scope in active_scopes
                 )
-                status = 429 if lock_seconds else 401
+                self.prune_login_attempts(database, now)
+                retry_seconds = max(remaining, lock_seconds)
+                status = 429 if retry_seconds else 401
                 message = (
                     "Too many attempts. Try again later."
-                    if lock_seconds
+                    if retry_seconds
                     else "Invalid username or password."
                 )
                 headers = (
-                    {"Retry-After": str(lock_seconds)} if lock_seconds else None
+                    {"Retry-After": str(retry_seconds)}
+                    if retry_seconds
+                    else None
                 )
                 return self.json_reply(status, {"error": message}, headers)
-            database.execute(
-                "DELETE FROM login_attempts WHERE scope_hash=?", (scope,)
+            database.executemany(
+                "DELETE FROM login_attempts WHERE scope_hash=?",
+                ((scope,) for scope in scopes),
             )
             database.execute(
                 "DELETE FROM sessions WHERE expires_at<=?", (now,)
@@ -644,14 +725,19 @@ class Handler(BaseHTTPRequestHandler):
     def register(self):
         """Create a regular user only when an administrator enabled registration."""
         try:
-            value = self.read_json()
+            value = self.read_json(AUTH_MAX_BYTES)
         except ValueError:
             return self.json_reply(400, {"error": "Complete all registration fields."})
         if "role" in value:
             return self.json_reply(400, {"error": "Account roles cannot be requested."})
-        username = value.get("username", "").strip()
-        display_name = value.get("displayName", "").strip()
+        username = value.get("username", "")
+        display_name = value.get("displayName", "")
         password = value.get("password", "")
+        registration_fields = (username, display_name, password)
+        if not all(isinstance(item, str) for item in registration_fields):
+            return self.json_reply(400, {"error": "Complete all registration fields."})
+        username = username.strip()
+        display_name = display_name.strip()
         if not validate_username(username):
             return self.json_reply(
                 400,
@@ -664,11 +750,32 @@ class Handler(BaseHTTPRequestHandler):
                 400, {"error": "Use a password between 12 and 256 characters."}
             )
         now = int(time.time())
+        with connect() as database:
+            if not registration_enabled(database):
+                return self.json_reply(
+                    403, {"error": "Registration is currently closed."}
+                )
+            user_count = database.execute(
+                "SELECT COUNT(*) AS total FROM users"
+            ).fetchone()["total"]
+            if user_count >= MAX_USERS:
+                return self.json_reply(
+                    403, {"error": "Account registration has reached its limit."}
+                )
+        password_hash = hash_password(password)
         try:
             with connect() as database:
+                database.execute("BEGIN IMMEDIATE")
                 if not registration_enabled(database):
                     return self.json_reply(
                         403, {"error": "Registration is currently closed."}
+                    )
+                user_count = database.execute(
+                    "SELECT COUNT(*) AS total FROM users"
+                ).fetchone()["total"]
+                if user_count >= MAX_USERS:
+                    return self.json_reply(
+                        403, {"error": "Account registration has reached its limit."}
                     )
                 cursor = database.execute(
                     """
@@ -679,7 +786,7 @@ class Handler(BaseHTTPRequestHandler):
                     (
                         username,
                         display_name,
-                        hash_password(password),
+                        password_hash,
                         now,
                         now,
                     ),
@@ -778,7 +885,7 @@ class Handler(BaseHTTPRequestHandler):
     def update_account(self, session):
         """Change display name, theme, or password for the current account."""
         try:
-            value = self.read_json()
+            value = self.read_json(AUTH_MAX_BYTES)
         except ValueError:
             return self.json_reply(400, {"error": "Invalid account update."})
         updates = []
@@ -790,7 +897,10 @@ class Handler(BaseHTTPRequestHandler):
             updates.append("display_name=?")
             parameters.append(display_name.strip())
         if "theme" in value:
-            if value["theme"] not in {"dark", "light"}:
+            if not isinstance(value["theme"], str) or value["theme"] not in {
+                "dark",
+                "light",
+            }:
                 return self.json_reply(400, {"error": "Invalid theme."})
             updates.append("theme=?")
             parameters.append(value["theme"])
@@ -798,6 +908,10 @@ class Handler(BaseHTTPRequestHandler):
         new_password = value.get("newPassword")
         if new_password is not None:
             current_password = value.get("currentPassword", "")
+            if not isinstance(current_password, str):
+                return self.json_reply(
+                    400, {"error": "Enter your current password."}
+                )
             if not validate_password(new_password):
                 return self.json_reply(
                     400,
@@ -887,7 +1001,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_reply(400, {"error": "Invalid user update."})
         role = value.get("role")
         active = value.get("active")
-        if role not in {"admin", "user"} or type(active) is not bool:
+        if (
+            not isinstance(role, str)
+            or role not in {"admin", "user"}
+            or type(active) is not bool
+        ):
             return self.json_reply(400, {"error": "Invalid user update."})
         with connect() as database:
             target = database.execute(
