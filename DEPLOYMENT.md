@@ -1,70 +1,77 @@
 # AI server deployment plan
 
-This is a review-only plan for deploying AI Content Studio to a separate AI server. The coding VPS is only for development and tests. Do not run the production steps on the coding VPS, and do not assume its containers, networks, proxy, ports or DNS match the AI server.
+This review-only plan applies to the separate production AI server. The coding VPS is only for source edits, tests, builds, screenshots, and Git operations. Do not copy private infrastructure details into Git.
 
-Commands use public placeholders and repository-defined names only. Keep hostnames, IP addresses, credentials, access policies and infrastructure details out of Git and pull request discussion.
+## 1. Development and review gate
 
-## 1. Release gate on a development or CI host
-
-- [ ] Confirm the reviewed commit is on `main` after the pull request is approved and merged.
+- [ ] Confirm the intended reviewed commit is on `main`.
 - [ ] Confirm `git status --short` is empty.
-- [ ] Run `node --check dist/app.js` and `node --check dist/seed.js`.
-- [ ] Run `python3 -m py_compile server.py`.
-- [ ] Run `python3 -m unittest discover -s tests -v`.
-- [ ] Run `docker build -t ai-content-studio:review .` where Docker is available.
-- [ ] Scan the tracked files and Git history for secrets, private exports, database files and personal media.
-- [ ] Confirm a license has been selected before changing repository visibility to public.
+- [ ] Run both JavaScript syntax checks.
+- [ ] Compile `server.py` and `tests/test_server.py`.
+- [ ] Run the full unittest suite.
+- [ ] Build the Docker image where Docker is available.
+- [ ] Review narrow mobile and desktop layouts in dark and light themes.
+- [ ] Complete `PUBLIC_RELEASE_CHECKLIST.md` before a visibility change.
+- [ ] Confirm the owner selected a license before adding one.
 
-Do not promote a commit if any required check fails. Tooling that is unavailable is unverified, not passed.
+Unavailable tooling is unverified, not passed. Local header simulation does not count as live Cloudflare Tunnel verification.
 
 ## 2. AI server preflight
 
-Every item in this section requires authorized access to the separate AI server. Do not run these checks on the coding VPS.
+Every item below requires separately authorized AI server access.
 
-- [ ] **AI server access required:** record the currently deployed commit or image tag and confirm the intended target commit.
-- [ ] **AI server access required:** inspect the installed Docker and Compose versions.
-- [ ] **AI server access required:** inspect existing containers, Compose projects, networks, volumes and port bindings for conflicts. Do not remove or rename unrelated resources.
-- [ ] **AI server access required:** inspect the existing HTTPS proxy or tunnel path and its private network reachability. Do not copy private topology into Git.
-- [ ] **AI server access required:** verify the intended host port is available and will remain bound to `127.0.0.1`, or use a private container network without publishing the app port.
-- [ ] **AI server access required:** create `.env` locally on the AI server from `.env.example`, with a unique username and long random password. Never print or commit the values.
-- [ ] **AI server access required:** confirm sufficient disk space and choose an off-server backup destination.
+- [ ] **AI server access required:** record deployed and target commits.
+- [ ] **AI server access required:** inspect Docker, Compose, containers, networks, volumes, and port conflicts without changing them.
+- [ ] **AI server access required:** inspect the HTTPS proxy or tunnel privately and confirm it preserves the public Host header.
+- [ ] **AI server access required:** identify the app's immediate proxy peer and set `AICS_TRUSTED_PROXY_NETWORKS` to the smallest verified peer CIDR needed to distinguish client addresses.
+- [ ] **AI server access required:** confirm untrusted peers cannot influence `CF-Connecting-IP` at the app boundary.
+- [ ] **AI server access required:** set finite `AICS_MAX_USERS` and `AICS_REGISTRATION_ATTEMPT_LIMIT` values appropriate for the installation.
+- [ ] **AI server access required:** keep the app loopback-only or on a private container network.
+- [ ] **AI server access required:** confirm disk space and an off-server backup destination.
+- [ ] **AI server access required:** keep registration off and Secure cookies on.
 
-## 3. Backup and change window
+## 3. Backup and migration preparation
 
-- [ ] **AI server access required:** notify the owner of the maintenance window and pause edits in open browser tabs.
-- [ ] **AI server access required:** identify the production Compose project and its SQLite volume without guessing from the coding VPS.
-- [ ] **AI server access required:** create a consistent SQLite backup using the command in `README.md`.
-- [ ] **AI server access required:** copy the backup off the AI server, protect it as sensitive data and verify that the file is non-empty.
-- [ ] **AI server access required:** record a private rollback reference for the prior commit or image. Do not place private server details in the repository.
+- [ ] **AI server access required:** pause browser edits.
+- [ ] **AI server access required:** identify the production Compose project and volume without guessing from development.
+- [ ] **AI server access required:** create and verify a consistent off-server SQLite backup.
+- [ ] **AI server access required:** record a private rollback image or commit.
+- [ ] **AI server access required:** set the initial admin values in private `.env`.
 
-No schema migration is currently planned. The application creates its single `workspace` table if it does not exist. A future schema-changing release must include explicit forward and rollback steps before deployment.
+The first start creates schema version 2 and copies the shared workspace to the initial admin. It leaves the legacy table unchanged and cannot overwrite a newer per-user workspace.
 
-## 4. Production deployment
+## 4. Production rollout
 
-These steps are intentionally not authorized by this plan alone. Run them only after the pull request is reviewed and merged and the owner explicitly approves deployment.
+These steps require explicit approval after review and merge.
 
-- [ ] **AI server access required:** fetch the reviewed merge commit from the canonical repository.
-- [ ] **AI server access required:** build the image from that exact commit and review the build result before replacing the running app.
-- [ ] **AI server access required:** start or update only the AI Content Studio Compose project. Do not use `docker compose down -v`.
-- [ ] **AI server access required:** confirm the `studio_data` volume remains attached and no unexpected volume was created.
+- [ ] **AI server access required:** fetch and build the exact reviewed commit.
+- [ ] **AI server access required:** update only AI Content Studio.
+- [ ] **AI server access required:** never run `docker compose down -v`.
+- [ ] **AI server access required:** confirm `studio_data` remains attached.
+- [ ] **AI server access required:** inspect migration logs without exposing private data.
+- [ ] **AI server access required:** remove the bootstrap password after successful creation and recreate the container.
 
 ## 5. Production verification
 
-- [ ] **AI server access required:** check `docker compose ps` and the container health result.
-- [ ] **AI server access required:** check `http://127.0.0.1:8787/healthz` from the AI server, or the private service address if the proxy runs in Docker.
-- [ ] **AI server access required:** confirm the app port is not publicly reachable over plain HTTP.
-- [ ] **AI server access required:** verify the public route uses valid HTTPS before sending Basic authentication credentials.
-- [ ] **AI server access required:** verify an unauthenticated app or API request is rejected while `/healthz` returns only its minimal status.
-- [ ] **AI server access required:** sign in through the HTTPS route and smoke-test workspace read, save and revision-conflict behavior without using sensitive content.
-- [ ] **AI server access required:** confirm existing projects remain present, then create and remove only an agreed fictional smoke-test record.
-- [ ] **AI server access required:** review proxy and application logs for errors without copying credentials or private data into the pull request.
+- [ ] **AI server access required:** check Compose status and `/healthz`.
+- [ ] **AI server access required:** confirm plain HTTP is not public and HTTPS is valid.
+- [ ] **AI server access required:** verify the in-app login replaces the browser Basic Auth dialog.
+- [ ] **AI server access required:** verify concurrent login bursts stop at the source limit without password work, session creation, or HTTP 500 responses beyond that limit.
+- [ ] **AI server access required:** verify a separate trusted client can sign in, untrusted peers cannot spoof client addresses, and unauthenticated API access is rejected.
+- [ ] **AI server access required:** verify enabled registration attempt limits and the total account cap.
+- [ ] **AI server access required:** verify HTTPS Origin matches the preserved public Host and the session cookie is Secure, HttpOnly, and SameSite Strict in the deployed browser.
+- [ ] **AI server access required:** verify migrated owner data and revision.
+- [ ] **AI server access required:** test logout, expiry, CSRF, account changes, and reauthentication.
+- [ ] **AI server access required:** confirm registration is off unless intentionally opened.
+- [ ] **AI server access required:** confirm regular-user isolation and denied admin access.
+- [ ] **AI server access required:** audit mobile and desktop layouts in both themes.
+- [ ] **AI server access required:** review logs without exposing private data.
 
 ## 6. Rollback
 
-- [ ] **AI server access required:** if verification fails, stop the rollout and restore the prior reviewed commit or image while keeping the existing data volume.
-- [ ] **AI server access required:** restore the SQLite backup only if data integrity was affected. Preserve the failed database separately for diagnosis.
-- [ ] **AI server access required:** repeat health, authentication, HTTPS and data checks after rollback.
+- [ ] **AI server access required:** restore the prior reviewed image while preserving the volume.
+- [ ] **AI server access required:** restore the backup only if integrity requires it.
+- [ ] **AI server access required:** preserve the failed database for diagnosis.
+- [ ] **AI server access required:** repeat health, authentication, HTTPS, and data checks.
 
-## Deployment record
-
-Keep private infrastructure details in an approved private operations record. A public-safe release note may include only the deployed version, verification result, whether a migration occurred and known limitations.
+Keep hostnames, addresses, credentials, policies, and topology in a private operations record.

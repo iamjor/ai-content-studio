@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-- Docker-based single-owner edition with SQLite persistence, browser authentication, JSON import/export, and conflict-aware saves.
-- Fictional sample project in the public source. Existing user data moves through explicit JSON export/import.
+- Replaced browser Basic Auth with an accessible in-app login and logout flow.
+- Added password hashing, server-side sessions, CSRF protection, expiry, and login throttling.
+- Added private per-user workspaces with non-destructive legacy owner migration.
+- Added closed-by-default registration and administrator user management.
+- Added account profile, password, and saved theme settings.
+- Added responsive light-blue dark and light themes, an original favicon, and attribution footer.
+- Expanded integration tests and self-hosting, migration, security, and release guidance.
 
-The first tagged release will be `v0.1.0` after the AI server deployment and browser smoke test.
+The first tag will follow separately approved deployment and browser audit.
