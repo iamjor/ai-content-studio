@@ -56,7 +56,8 @@ These steps require explicit approval after review and merge.
 - [ ] **AI server access required:** check Compose status and `/healthz`.
 - [ ] **AI server access required:** confirm plain HTTP is not public and HTTPS is valid.
 - [ ] **AI server access required:** verify the in-app login replaces the browser Basic Auth dialog.
-- [ ] **AI server access required:** verify blocked login sources are rejected before credential work, a separate trusted client can sign in, untrusted peers cannot spoof client addresses, and unauthenticated API access is rejected.
+- [ ] **AI server access required:** verify concurrent login bursts stop at the source limit without password work, session creation, or HTTP 500 responses beyond that limit.
+- [ ] **AI server access required:** verify a separate trusted client can sign in, untrusted peers cannot spoof client addresses, and unauthenticated API access is rejected.
 - [ ] **AI server access required:** verify enabled registration attempt limits and the total account cap.
 - [ ] **AI server access required:** verify HTTPS Origin matches the preserved public Host and the session cookie is Secure, HttpOnly, and SameSite Strict in the deployed browser.
 - [ ] **AI server access required:** verify migrated owner data and revision.

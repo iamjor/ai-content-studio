@@ -1,5 +1,6 @@
 """Integration tests for authentication, authorization, migration, and isolation."""
 
+import concurrent.futures
 import http.cookies
 import json
 import os
@@ -8,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -118,8 +120,9 @@ class LoginThrottleUnitTests(unittest.TestCase):
             return_value={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}
         )
         handler.attempt_scope = unittest.mock.Mock(return_value="blocked-source")
-        handler.prune_attempts = unittest.mock.Mock()
-        handler.attempt_blocked = unittest.mock.Mock(return_value=60)
+        handler.reserve_attempt = unittest.mock.Mock(
+            return_value=(False, 60, 0)
+        )
         handler.json_reply = unittest.mock.Mock(return_value="blocked")
 
         database = unittest.mock.MagicMock()
@@ -137,6 +140,115 @@ class LoginThrottleUnitTests(unittest.TestCase):
             {"error": "Too many attempts. Try again later."},
             {"Retry-After": "60"},
         )
+
+    def test_concurrent_burst_reserves_limit_before_verification(self):
+        """Allow only the atomic limit to verify or create server sessions."""
+        burst_size = server.LOGIN_LIMIT + 3
+        release_verifiers = threading.Event()
+        verification_lock = threading.Lock()
+        verification_count = 0
+
+        def controlled_verify(password, encoded):
+            """Pause accepted verifications so excess requests hit the reservation."""
+            nonlocal verification_count
+            with verification_lock:
+                verification_count += 1
+            if not release_verifiers.wait(timeout=20):
+                raise RuntimeError("concurrency test verifier timed out")
+            return True
+
+        class QuietHandler(server.Handler):
+            """Run the burst without emitting one production log line per request."""
+
+            def log_message(self, message_format, *args):
+                """Suppress expected status logs inside this focused test."""
+                return None
+
+        with tempfile.TemporaryDirectory(prefix="aics-concurrency-") as temp_dir:
+            database_path = Path(temp_dir) / "concurrency.sqlite3"
+            patches = (
+                unittest.mock.patch.object(server, "DB_PATH", database_path),
+                unittest.mock.patch.object(server, "ADMIN_USERNAME", ADMIN_USERNAME),
+                unittest.mock.patch.object(server, "ADMIN_PASSWORD", ADMIN_PASSWORD),
+                unittest.mock.patch.object(
+                    server, "ADMIN_DISPLAY_NAME", "Concurrency Owner"
+                ),
+                unittest.mock.patch.object(server, "PASSWORD_ITERATIONS", 1_000),
+                unittest.mock.patch.object(
+                    server, "verify_password", side_effect=controlled_verify
+                ),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                server.setup()
+                httpd = server.ThreadingHTTPServer(
+                    ("127.0.0.1", 0), QuietHandler
+                )
+                httpd.daemon_threads = True
+                serving = threading.Thread(
+                    target=httpd.serve_forever, daemon=True
+                )
+                serving.start()
+                base_url = "http://127.0.0.1:" + str(httpd.server_port)
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=burst_size
+                )
+                futures = [
+                    executor.submit(
+                        TestClient(base_url).login,
+                        ADMIN_USERNAME,
+                        ADMIN_PASSWORD,
+                    )
+                    for _ in range(burst_size)
+                ]
+                try:
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        with verification_lock:
+                            started = verification_count
+                        if started == server.LOGIN_LIMIT:
+                            break
+                        time.sleep(0.01)
+                    self.assertEqual(started, server.LOGIN_LIMIT)
+
+                    excess = burst_size - server.LOGIN_LIMIT
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        completed = [future for future in futures if future.done()]
+                        if len(completed) == excess:
+                            break
+                        time.sleep(0.01)
+                    self.assertEqual(len(completed), excess)
+                    early_statuses = [future.result()[0] for future in completed]
+                    self.assertEqual(early_statuses, [429] * excess)
+                    self.assertNotIn(500, early_statuses)
+                    with sqlite3.connect(database_path) as database:
+                        session_count = database.execute(
+                            "SELECT COUNT(*) FROM sessions"
+                        ).fetchone()[0]
+                    self.assertEqual(session_count, 0)
+                finally:
+                    release_verifiers.set()
+                    try:
+                        results = [
+                            future.result(timeout=10) for future in futures
+                        ]
+                    finally:
+                        executor.shutdown(wait=True)
+                        httpd.shutdown()
+                        httpd.server_close()
+                        serving.join(timeout=5)
+
+                statuses = [status for status, _, _ in results]
+                self.assertEqual(statuses.count(200), server.LOGIN_LIMIT)
+                self.assertEqual(statuses.count(429), excess)
+                self.assertNotIn(500, statuses)
+                with verification_lock:
+                    self.assertEqual(verification_count, server.LOGIN_LIMIT)
+                with sqlite3.connect(database_path) as database:
+                    session_count = database.execute(
+                        "SELECT COUNT(*) FROM sessions"
+                    ).fetchone()[0]
+                self.assertEqual(session_count, server.LOGIN_LIMIT)
 
     def test_forwarded_address_requires_a_trusted_direct_peer(self):
         """Use Cloudflare's address only when the immediate peer is trusted."""

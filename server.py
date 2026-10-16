@@ -644,6 +644,46 @@ class Handler(BaseHTTPRequestHandler):
             (LOGIN_SCOPE_LIMIT,),
         )
 
+    def reserve_attempt(self, database, scope, now, limit):
+        """Atomically reserve one attempt before expensive or sensitive work."""
+        database.execute("BEGIN IMMEDIATE")
+        self.prune_attempts(database, now)
+        remaining = self.attempt_blocked(database, scope, now)
+        if remaining:
+            return False, remaining, 0
+        block_after_failure = self.record_attempt(
+            database, scope, now, limit
+        )
+        return True, 0, block_after_failure
+
+    def release_login_attempt(self, database, scope):
+        """Release a successful reservation without erasing concurrent failures."""
+        database.execute("BEGIN IMMEDIATE")
+        row = database.execute(
+            "SELECT failures FROM login_attempts WHERE scope_hash=?", (scope,)
+        ).fetchone()
+        if not row:
+            return
+        failures = max(0, row["failures"] - 1)
+        if failures == 0:
+            database.execute(
+                "DELETE FROM login_attempts WHERE scope_hash=?", (scope,)
+            )
+            return
+        blocked_until = (
+            0
+            if failures < LOGIN_LIMIT
+            else int(time.time()) + LOGIN_LOCK_SECONDS
+        )
+        database.execute(
+            """
+            UPDATE login_attempts
+            SET failures=?, blocked_until=?
+            WHERE scope_hash=?
+            """,
+            (failures, blocked_until, scope),
+        )
+
     def login(self):
         """Authenticate credentials, enforce throttling, and issue a session cookie."""
         try:
@@ -664,9 +704,10 @@ class Handler(BaseHTTPRequestHandler):
         scope = self.attempt_scope("login")
         now = int(time.time())
         with connect() as database:
-            self.prune_attempts(database, now)
-            remaining = self.attempt_blocked(database, scope, now)
-            if remaining:
+            accepted, remaining, block_after_failure = self.reserve_attempt(
+                database, scope, now, LOGIN_LIMIT
+            )
+            if not accepted:
                 return self.json_reply(
                     429,
                     {"error": "Too many attempts. Try again later."},
@@ -675,29 +716,26 @@ class Handler(BaseHTTPRequestHandler):
             user = database.execute(
                 "SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)
             ).fetchone()
-            encoded = user["password_hash"] if user else DUMMY_PASSWORD_HASH
-            password_matches = verify_password(password, encoded)
-            valid = bool(user and user["is_active"] and password_matches)
-            if not valid:
-                lock_seconds = self.record_attempt(
-                    database, scope, now, LOGIN_LIMIT
-                )
-                self.prune_attempts(database, now)
-                status = 429 if lock_seconds else 401
-                message = (
-                    "Too many attempts. Try again later."
-                    if lock_seconds
-                    else "Invalid username or password."
-                )
-                headers = (
-                    {"Retry-After": str(lock_seconds)}
-                    if lock_seconds
-                    else None
-                )
-                return self.json_reply(status, {"error": message}, headers)
-            database.execute(
-                "DELETE FROM login_attempts WHERE scope_hash=?", (scope,)
+
+        encoded = user["password_hash"] if user else DUMMY_PASSWORD_HASH
+        password_matches = verify_password(password, encoded)
+        valid = bool(user and user["is_active"] and password_matches)
+        if not valid:
+            status = 429 if block_after_failure else 401
+            message = (
+                "Too many attempts. Try again later."
+                if block_after_failure
+                else "Invalid username or password."
             )
+            headers = (
+                {"Retry-After": str(block_after_failure)}
+                if block_after_failure
+                else None
+            )
+            return self.json_reply(status, {"error": message}, headers)
+
+        with connect() as database:
+            self.release_login_attempt(database, scope)
             database.execute(
                 "DELETE FROM sessions WHERE expires_at<=?", (now,)
             )
