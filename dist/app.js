@@ -163,8 +163,7 @@
     byId("accountUsername").value = session.user.username;
     byId("accountDisplayName").value = session.user.displayName;
     byId("adminNav").classList.toggle("hidden", session.user.role !== "admin");
-    byId("toolForm").classList.toggle("hidden", session.user.role !== "admin");
-    byId("toolFilterWrap").classList.toggle("hidden", session.user.role !== "admin");
+    byId("toolAdminActions").classList.toggle("hidden", session.user.role !== "admin");
   }
 
   async function loadWorkspace() {
@@ -365,11 +364,28 @@
     catch (error) { byId("toolGrid").innerHTML = '<div class="notice">' + escapeHtml(error.message) + '</div>'; }
   }
 
+  /** Reset tool dialog state so values and errors never leak between opens. */
   function clearToolForm() {
     byId("toolForm").reset();
     byId("toolId").value = "";
     byId("toolFormTitle").textContent = "Add tool";
     setStatus(byId("toolStatus"), "", "");
+  }
+
+  /** Open the shared tool editor for a new record or one selected record. */
+  function openToolDialog(tool) {
+    clearToolForm();
+    if (tool) {
+      byId("toolId").value = tool.id;
+      byId("toolName").value = tool.name;
+      byId("toolCategory").value = tool.category;
+      byId("toolUrl").value = tool.url;
+      byId("toolPurpose").value = tool.purpose;
+      byId("toolNotes").value = tool.notes;
+      byId("toolFormTitle").textContent = "Edit tool";
+    }
+    byId("toolDialog").showModal();
+    byId("toolName").focus();
   }
 
   async function bootstrap() {
@@ -464,9 +480,10 @@
   byId("registrationSettingsForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/admin/settings", {method: "PUT", body: {registrationEnabled: byId("registrationEnabled").checked}}); byId("registrationPrompt").dataset.enabled = result.registrationEnabled ? "true" : ""; setStatus(byId("adminSettingsStatus"), "Registration setting saved.", "success"); } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); } });
   byId("userList").addEventListener("click", async function (event) { var button = event.target.closest("[data-user-action]"); if (!button) { return; } var row = button.closest("[data-user-row]"); var action = button.dataset.userAction; if (action === "delete" && !window.confirm("Permanently delete this account, its workspace, and all uploaded assets? This cannot be undone.")) { return; } if (["disable", "archive"].includes(action) && !window.confirm((action === "disable" ? "Disable sign-in" : "Archive this account") + " while retaining its workspace and uploads?")) { return; } try { if (action === "delete") { await api("/api/admin/users/" + row.dataset.userRow, {method: "DELETE"}); } else { await api("/api/admin/users/" + row.dataset.userRow, {method: "PUT", body: {action: action, role: row.querySelector("[data-user-role]").value}}); } await loadAdmin(); } catch (error) { window.alert(error.message); } });
 
-  byId("toolForm").addEventListener("submit", async function (event) { event.preventDefault(); var id = byId("toolId").value; var body = {action: "edit", name: byId("toolName").value.trim(), category: byId("toolCategory").value.trim(), url: byId("toolUrl").value.trim(), purpose: byId("toolPurpose").value.trim(), notes: byId("toolNotes").value.trim()}; try { await api(id ? "/api/admin/tools/" + id : "/api/admin/tools", {method: id ? "PUT" : "POST", body: body}); clearToolForm(); await loadTools(); setStatus(byId("toolStatus"), "Tool saved.", "success"); } catch (error) { setStatus(byId("toolStatus"), error.message, "error"); } });
-  byId("cancelToolEdit").addEventListener("click", clearToolForm);
-  byId("toolGrid").addEventListener("click", async function (event) { var button = event.target.closest("[data-tool-action]"); if (!button) { return; } var card = button.closest("[data-tool-id]"); var tool = toolRecords.find(function (item) { return String(item.id) === card.dataset.toolId; }); var action = button.dataset.toolAction; if (action === "edit") { byId("toolId").value = tool.id; byId("toolName").value = tool.name; byId("toolCategory").value = tool.category; byId("toolUrl").value = tool.url; byId("toolPurpose").value = tool.purpose; byId("toolNotes").value = tool.notes; byId("toolFormTitle").textContent = "Edit tool"; byId("toolName").focus(); return; } if (action === "delete" && !window.confirm("Permanently delete this shared tool?")) { return; } try { if (action === "delete") { await api("/api/admin/tools/" + tool.id, {method: "DELETE"}); } else { await api("/api/admin/tools/" + tool.id, {method: "PUT", body: {action: action}}); } await loadTools(); } catch (error) { window.alert(error.message); } });
+  byId("addTool").addEventListener("click", function () { openToolDialog(null); });
+  byId("toolDialog").addEventListener("close", clearToolForm);
+  byId("toolForm").addEventListener("submit", async function (event) { event.preventDefault(); var id = byId("toolId").value; var body = {action: "edit", name: byId("toolName").value.trim(), category: byId("toolCategory").value.trim(), url: byId("toolUrl").value.trim(), purpose: byId("toolPurpose").value.trim(), notes: byId("toolNotes").value.trim()}; try { await api(id ? "/api/admin/tools/" + id : "/api/admin/tools", {method: id ? "PUT" : "POST", body: body}); await loadTools(); byId("toolDialog").close(); } catch (error) { setStatus(byId("toolStatus"), error.message, "error"); } });
+  byId("toolGrid").addEventListener("click", async function (event) { var button = event.target.closest("[data-tool-action]"); if (!button) { return; } var card = button.closest("[data-tool-id]"); var tool = toolRecords.find(function (item) { return String(item.id) === card.dataset.toolId; }); var action = button.dataset.toolAction; if (action === "edit") { openToolDialog(tool); return; } if (action === "delete" && !window.confirm("Permanently delete this shared tool?")) { return; } try { if (action === "delete") { await api("/api/admin/tools/" + tool.id, {method: "DELETE"}); } else { await api("/api/admin/tools/" + tool.id, {method: "PUT", body: {action: action}}); } await loadTools(); } catch (error) { window.alert(error.message); } });
 
   bootstrap();
 })();

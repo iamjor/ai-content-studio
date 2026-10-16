@@ -74,21 +74,20 @@
     <div class="shell">
       <aside class="side" id="sidebar">
         <div class="side-top">
-          <div class="brand">
-            <img src="/favicon.svg" alt="" width="36" height="36">
-            <div><strong>AI Content Studio</strong><small>CREATIVE WORKSPACE</small></div>
+          <div class="brand sidebar-mark">
+            <img src="/favicon.svg" alt="AI Content Studio" title="AI Content Studio" width="36" height="36">
           </div>
           <button class="icon-btn" id="navToggle" type="button" aria-label="Open sidebar" aria-expanded="true" aria-controls="primaryNav"><span aria-hidden="true">‹</span><span class="sr" id="navToggleText">Close sidebar</span></button>
         </div>
         <nav class="nav" id="primaryNav" aria-label="Studio sections">
-          <button type="button" class="active" data-tab="overview"><span class="n">01</span><span>Studio home</span></button>
-          <button type="button" data-tab="projects"><span class="n">02</span><span>Projects</span></button>
-          <button type="button" data-tab="episodes"><span class="n">03</span><span>Episodes</span></button>
-          <button type="button" data-tab="characters"><span class="n">04</span><span>Characters</span></button>
-          <button type="button" data-tab="workflow"><span class="n">05</span><span>Workflow</span></button>
-          <button type="button" data-tab="tools"><span class="n">06</span><span>Tools</span></button>
-          <button type="button" data-tab="account"><span class="n">07</span><span>Account</span></button>
-          <button type="button" class="hidden" id="adminNav" data-tab="admin"><span class="n">08</span><span>Admin</span></button>
+          <button type="button" class="active" data-tab="overview" aria-label="Studio home" title="Studio home"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 11.5 12 4l9 7.5M5.5 10v10h13V10M9.5 20v-6h5v6"/></svg><span class="nav-label">Studio home</span></button>
+          <button type="button" data-tab="projects" aria-label="Projects" title="Projects"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l2-2h9v13h-17zM3.5 10.5h17"/></svg><span class="nav-label">Projects</span></button>
+          <button type="button" data-tab="episodes" aria-label="Episodes" title="Episodes"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m10 8 6 4-6 4z"/></svg><span class="nav-label">Episodes</span></button>
+          <button type="button" data-tab="characters" aria-label="Characters" title="Characters"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.7-4.1 3-6.2 7-6.2s6.3 2.1 7 6.2"/></svg><span class="nav-label">Characters</span></button>
+          <button type="button" data-tab="workflow" aria-label="Workflow" title="Workflow"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.5 6H14a4 4 0 0 1 4 4v5.5M15.5 18H10a4 4 0 0 1-4-4V8.5"/></svg><span class="nav-label">Workflow</span></button>
+          <button type="button" data-tab="tools" aria-label="Tools" title="Tools"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14.5 5.2a4 4 0 0 0-5.2 5.2L4 15.7 8.3 20l5.3-5.3a4 4 0 0 0 5.2-5.2l-2.7 2.7-3.3-3.3z"/></svg><span class="nav-label">Tools</span></button>
+          <button type="button" data-tab="account" aria-label="Account" title="Account"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="3"/><path d="M6 20v-2.5a4.5 4.5 0 0 1 4.5-4.5h3a4.5 4.5 0 0 1 4.5 4.5V20"/></svg><span class="nav-label">Account</span></button>
+          <button type="button" class="hidden" id="adminNav" data-tab="admin" aria-label="Admin" title="Admin"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3 20 6v5c0 5-3.1 8.4-8 10-4.9-1.6-8-5-8-10V6z"/><path d="m9 12 2 2 4-4"/></svg><span class="nav-label">Admin</span></button>
         </nav>
         <div class="sidefoot">
           <strong id="sideUserName">Studio user</strong>
@@ -192,8 +191,8 @@
         </section>
 
         <section class="section" id="tools" aria-labelledby="toolsTitle">
-          <div class="rowhead"><div><h2 id="toolsTitle">Production tools</h2><p>An administrator-managed shared catalog.</p></div><label class="compact-field hidden" id="toolFilterWrap">View<select id="toolFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
-          <div class="stack" id="toolGrid"></div><form class="panel hidden" id="toolForm"><h3 id="toolFormTitle">Add tool</h3><input id="toolId" type="hidden"><div class="settings-grid"><label class="field">Name<input id="toolName" type="text" required maxlength="100"></label><label class="field">Category<input id="toolCategory" type="text" required maxlength="60"></label></div><label class="field">Official HTTPS link<input id="toolUrl" type="url" required maxlength="500" pattern="https://.*"></label><label class="field">Short purpose<textarea id="toolPurpose" class="textarea-short" required maxlength="300"></textarea></label><label class="field">Optional notes<textarea id="toolNotes" class="textarea-short" maxlength="500"></textarea></label><div class="action-row"><button class="btn primary" type="submit">Save tool</button><button class="btn" id="cancelToolEdit" type="button">Clear</button></div><p class="form-status" id="toolStatus" role="status"></p></form>
+          <div class="rowhead"><div><h2 id="toolsTitle">Production tools</h2><p>An administrator-managed shared catalog.</p></div><div class="action-row hidden" id="toolAdminActions"><label class="compact-field" id="toolFilterWrap">View<select id="toolFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addTool" type="button">+ Add tool</button></div></div>
+          <div class="stack" id="toolGrid"></div>
           <div class="rowhead"><div><h2>Cost and rights</h2></div></div>
           <div class="notice">Cloud video credits and free exports can change. Keep clean masters and approved character references. Use music with rights for every platform where you publish.</div>
         </section>
@@ -257,9 +256,25 @@
   </div>
 
   <footer class="site-footer">
-    <span><strong id="footerAppName">AI Content Studio</strong> <span id="footerVersion"></span></span>
-    <span>© <span id="footerYear"></span> · <a href="https://www.jomaroliverreyes.com/" target="_blank" rel="noopener noreferrer">Developed by JOR</a></span>
+    <span class="footer-line"><strong id="footerAppName">AI Content Studio</strong> <span id="footerVersion"></span><span aria-hidden="true">·</span><span>© <span id="footerYear"></span></span><span aria-hidden="true">·</span><a href="https://www.jomaroliverreyes.com/" target="_blank" rel="noopener noreferrer">Developed by JOR</a></span>
   </footer>
+
+  <dialog class="modal" id="toolDialog" aria-labelledby="toolFormTitle">
+    <form id="toolForm">
+      <div class="eyebrow">Shared catalog</div>
+      <h2 id="toolFormTitle">Add tool</h2>
+      <input id="toolId" type="hidden">
+      <div class="settings-grid">
+        <label class="field">Name<input id="toolName" type="text" required maxlength="100"></label>
+        <label class="field">Category<input id="toolCategory" type="text" required maxlength="60"></label>
+      </div>
+      <label class="field">Official HTTPS link<input id="toolUrl" type="url" required maxlength="500" pattern="https://.*"></label>
+      <label class="field">Short purpose<textarea id="toolPurpose" class="textarea-short" required maxlength="300"></textarea></label>
+      <label class="field">Optional notes<textarea id="toolNotes" class="textarea-short" maxlength="500"></textarea></label>
+      <p class="form-status" id="toolStatus" role="status" aria-live="polite"></p>
+      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Save tool</button></div>
+    </form>
+  </dialog>
 
   <dialog class="modal" id="projectDialog">
     <form method="dialog" id="projectForm">
