@@ -8,7 +8,7 @@ Run behind HTTPS. Compose binds to `127.0.0.1`. Secure cookies are enabled by de
 
 Registration is disabled by default and creates regular users only. Open it only intentionally.
 
-Passwords use salted PBKDF2-SHA256 records. Sessions are random, fixed-lifetime, stored server-side, and transported in HttpOnly, SameSite Strict cookies. State changes require a CSRF token. Login failures are throttled by source and known account, while valid credentials remain usable after failure limits. Forwarded client addresses are accepted only from explicitly configured trusted proxy networks.
+Passwords use salted PBKDF2-SHA256 records. Sessions are random, fixed-lifetime, stored server-side, and transported in HttpOnly, SameSite Strict cookies. State changes require a CSRF token. Login failures are throttled by source before password verification, and enabled registration has a separate per-source attempt limit. Forwarded client addresses are accepted only from explicitly configured trusted proxy networks.
 
 Rotate exposed passwords immediately. Password changes revoke all user sessions. Disable accounts from Admin when access must stop.
 

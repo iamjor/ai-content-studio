@@ -10,9 +10,12 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import server
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,12 +88,13 @@ class TestClient:
                 if not morsel.value:
                     self.csrf_token = ""
 
-    def login(self, username, password):
+    def login(self, username, password, extra_headers=None):
         """Authenticate and retain the issued session and CSRF values."""
         return self.request(
             "/api/login",
             method="POST",
             payload={"username": username, "password": password},
+            extra_headers=extra_headers,
         )
 
     def register(self, username, display_name, password, extra=None):
@@ -102,6 +106,50 @@ class TestClient:
         }
         payload.update(extra or {})
         return self.request("/api/register", method="POST", payload=payload)
+
+
+class LoginThrottleUnitTests(unittest.TestCase):
+    """Test throttle decisions that must happen before credential verification."""
+
+    def test_blocked_source_skips_password_verification(self):
+        """Return 429 without querying users or verifying a supplied password."""
+        handler = object.__new__(server.Handler)
+        handler.read_json = unittest.mock.Mock(
+            return_value={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}
+        )
+        handler.attempt_scope = unittest.mock.Mock(return_value="blocked-source")
+        handler.prune_attempts = unittest.mock.Mock()
+        handler.attempt_blocked = unittest.mock.Mock(return_value=60)
+        handler.json_reply = unittest.mock.Mock(return_value="blocked")
+
+        database = unittest.mock.MagicMock()
+        connection = unittest.mock.MagicMock()
+        connection.__enter__.return_value = database
+        with unittest.mock.patch.object(server, "connect", return_value=connection):
+            with unittest.mock.patch.object(server, "verify_password") as verify:
+                result = handler.login()
+
+        self.assertEqual(result, "blocked")
+        verify.assert_not_called()
+        database.execute.assert_not_called()
+        handler.json_reply.assert_called_once_with(
+            429,
+            {"error": "Too many attempts. Try again later."},
+            {"Retry-After": "60"},
+        )
+
+    def test_forwarded_address_requires_a_trusted_direct_peer(self):
+        """Use Cloudflare's address only when the immediate peer is trusted."""
+        handler = object.__new__(server.Handler)
+        handler.headers = {"CF-Connecting-IP": "203.0.113.25"}
+        trusted = (server.ipaddress.ip_network("127.0.0.1/32"),)
+        with unittest.mock.patch.object(
+            server, "TRUSTED_PROXY_NETWORKS", trusted
+        ):
+            handler.client_address = ("192.0.2.10", 1234)
+            self.assertEqual(handler.login_client_address(), "192.0.2.10")
+            handler.client_address = ("127.0.0.1", 1234)
+            self.assertEqual(handler.login_client_address(), "203.0.113.25")
 
 
 class ServerIntegrationTests(unittest.TestCase):
@@ -152,6 +200,8 @@ class ServerIntegrationTests(unittest.TestCase):
                 "AICS_DB_PATH": str(cls.database_path),
                 "AICS_REGISTRATION_ENABLED": "0",
                 "AICS_MAX_USERS": "8",
+                "AICS_REGISTRATION_ATTEMPT_LIMIT": "5",
+                "AICS_TRUSTED_PROXY_NETWORKS": "127.0.0.1/32",
                 "AICS_SESSION_HOURS": "12",
                 "PORT": str(cls.port),
             }
@@ -190,6 +240,11 @@ class ServerIntegrationTests(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 cls.process.kill()
                 cls.process.wait()
+
+    def setUp(self):
+        """Clear request throttles so every integration test is independent."""
+        with sqlite3.connect(self.database_path) as database:
+            database.execute("DELETE FROM login_attempts")
 
     def admin_client(self):
         """Return a newly authenticated administrator client."""
@@ -519,9 +574,74 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
-    def test_09_registration_account_limit(self):
-        """Stop public registration at the configured total account limit."""
+    def test_09_registration_attempt_limit(self):
+        """Limit repeated registration attempts from one trusted client source."""
         self.set_registration(True)
+        client = TestClient(self.base_url)
+        headers = {"CF-Connecting-IP": "198.51.100.30"}
+        statuses = []
+        for _ in range(5):
+            status, _, _ = client.request(
+                "/api/register",
+                method="POST",
+                payload={
+                    "username": ADMIN_USERNAME,
+                    "displayName": "Duplicate Owner",
+                    "password": "duplicate-password-123",
+                },
+                extra_headers=headers,
+            )
+            statuses.append(status)
+        self.assertEqual(statuses, [409, 409, 409, 409, 409])
+
+        status, payload, response_headers = client.request(
+            "/api/register",
+            method="POST",
+            payload={
+                "username": "sixth-attempt",
+                "displayName": "Sixth Attempt",
+                "password": "sixth-attempt-password",
+            },
+            extra_headers=headers,
+        )
+        self.assertEqual(status, 429)
+        self.assertIn("later", payload["error"].lower())
+        self.assertIsNotNone(response_headers.get("Retry-After"))
+
+    def test_10_registration_account_limit(self):
+        """Test the total account cap without depending on earlier test data."""
+        self.set_registration(True)
+        maximum_users = 8
+        now = int(time.time())
+        with sqlite3.connect(self.database_path) as database:
+            database.execute("PRAGMA foreign_keys=ON")
+            database.execute(
+                "DELETE FROM users WHERE username<>?", (ADMIN_USERNAME,)
+            )
+            owner_hash = database.execute(
+                "SELECT password_hash FROM users WHERE username=?",
+                (ADMIN_USERNAME,),
+            ).fetchone()[0]
+            current_users = database.execute(
+                "SELECT COUNT(*) FROM users"
+            ).fetchone()[0]
+            fillers_needed = max(0, maximum_users - current_users - 1)
+            for index in range(fillers_needed):
+                database.execute(
+                    """
+                    INSERT INTO users
+                        (username, display_name, password_hash, role, created_at, updated_at)
+                    VALUES (?, ?, ?, 'user', ?, ?)
+                    """,
+                    (
+                        "capfill" + str(index),
+                        "Capacity Filler " + str(index),
+                        owner_hash,
+                        now,
+                        now,
+                    ),
+                )
+
         allowed = TestClient(self.base_url)
         status, _, _ = allowed.register(
             "limituser", "Limit User", "limit-user-password"
@@ -535,7 +655,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("limit", payload["error"].lower())
 
-    def test_10_https_proxy_origin_and_secure_cookie_contract(self):
+    def test_11_https_proxy_origin_and_secure_cookie_contract(self):
         """Simulate preserved public Host and HTTPS Origin headers locally."""
         proxy_headers = {
             "Host": "studio.example.test",
@@ -568,41 +688,35 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(status, 403)
 
-    def test_11_login_throttling(self):
-        """Throttle username cycling without letting failures lock out the owner."""
-        with sqlite3.connect(self.database_path) as database:
-            database.execute("DELETE FROM login_attempts")
-
+    def test_12_login_throttling(self):
+        """Block one trusted source before allowing a separate source to sign in."""
         client = TestClient(self.base_url)
+        blocked_headers = {"CF-Connecting-IP": "198.51.100.40"}
         statuses = []
         for attempt in range(5):
-            status, _, _ = client.request(
-                "/api/login",
-                method="POST",
-                payload={
-                    "username": "changing-" + str(attempt),
-                    "password": "incorrect-password",
-                },
-                extra_headers={
-                    "CF-Connecting-IP": "198.51.100." + str(attempt + 1)
-                },
+            status, _, _ = client.login(
+                "changing-" + str(attempt),
+                "incorrect-password",
+                extra_headers=blocked_headers,
             )
             statuses.append(status)
         self.assertEqual(statuses[-1], 429)
 
-        status, payload, headers = client.request(
-            "/api/login",
-            method="POST",
-            payload={"username": "another-name", "password": "incorrect-password"},
-            extra_headers={"CF-Connecting-IP": "203.0.113.99"},
+        status, payload, headers = client.login(
+            "another-name",
+            "incorrect-password",
+            extra_headers=blocked_headers,
         )
         self.assertEqual(status, 429)
         self.assertIn("later", payload["error"].lower())
         self.assertIsNotNone(headers.get("Retry-After"))
 
-        for _ in range(5):
-            client.login(ADMIN_USERNAME, "incorrect-password")
-        status, payload, _ = client.login(ADMIN_USERNAME, ADMIN_PASSWORD)
+        trusted_client = TestClient(self.base_url)
+        status, payload, _ = trusted_client.login(
+            ADMIN_USERNAME,
+            ADMIN_PASSWORD,
+            extra_headers={"CF-Connecting-IP": "198.51.100.41"},
+        )
         self.assertEqual(status, 200, payload)
 
         self.assertEqual(
@@ -618,7 +732,7 @@ class ServerIntegrationTests(unittest.TestCase):
             400,
         )
 
-    def test_12_frontend_contract(self):
+    def test_13_frontend_contract(self):
         """Keep responsive, themed, versioned, and attributed shell requirements."""
         client = TestClient(self.base_url)
         html = client.request("/")[1]

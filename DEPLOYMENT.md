@@ -14,7 +14,7 @@ This review-only plan applies to the separate production AI server. The coding V
 - [ ] Complete `PUBLIC_RELEASE_CHECKLIST.md` before a visibility change.
 - [ ] Confirm the owner selected a license before adding one.
 
-Unavailable tooling is unverified, not passed.
+Unavailable tooling is unverified, not passed. Local header simulation does not count as live Cloudflare Tunnel verification.
 
 ## 2. AI server preflight
 
@@ -23,8 +23,9 @@ Every item below requires separately authorized AI server access.
 - [ ] **AI server access required:** record deployed and target commits.
 - [ ] **AI server access required:** inspect Docker, Compose, containers, networks, volumes, and port conflicts without changing them.
 - [ ] **AI server access required:** inspect the HTTPS proxy or tunnel privately and confirm it preserves the public Host header.
-- [ ] **AI server access required:** identify the app's immediate proxy peer and set `AICS_TRUSTED_PROXY_NETWORKS` only if verified client-address throttling is required.
-- [ ] **AI server access required:** set a finite `AICS_MAX_USERS` appropriate for the installation.
+- [ ] **AI server access required:** identify the app's immediate proxy peer and set `AICS_TRUSTED_PROXY_NETWORKS` to the smallest verified peer CIDR needed to distinguish client addresses.
+- [ ] **AI server access required:** confirm untrusted peers cannot influence `CF-Connecting-IP` at the app boundary.
+- [ ] **AI server access required:** set finite `AICS_MAX_USERS` and `AICS_REGISTRATION_ATTEMPT_LIMIT` values appropriate for the installation.
 - [ ] **AI server access required:** keep the app loopback-only or on a private container network.
 - [ ] **AI server access required:** confirm disk space and an off-server backup destination.
 - [ ] **AI server access required:** keep registration off and Secure cookies on.
@@ -55,7 +56,8 @@ These steps require explicit approval after review and merge.
 - [ ] **AI server access required:** check Compose status and `/healthz`.
 - [ ] **AI server access required:** confirm plain HTTP is not public and HTTPS is valid.
 - [ ] **AI server access required:** verify the in-app login replaces the browser Basic Auth dialog.
-- [ ] **AI server access required:** verify login throttling, owner access after shared-peer failures, ignored headers from untrusted peers, and rejected unauthenticated API access.
+- [ ] **AI server access required:** verify blocked login sources are rejected before credential work, a separate trusted client can sign in, untrusted peers cannot spoof client addresses, and unauthenticated API access is rejected.
+- [ ] **AI server access required:** verify enabled registration attempt limits and the total account cap.
 - [ ] **AI server access required:** verify HTTPS Origin matches the preserved public Host and the session cookie is Secure, HttpOnly, and SameSite Strict in the deployed browser.
 - [ ] **AI server access required:** verify migrated owner data and revision.
 - [ ] **AI server access required:** test logout, expiry, CSRF, account changes, and reauthentication.

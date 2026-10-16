@@ -26,6 +26,9 @@ LOGIN_LIMIT = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_LOCK_SECONDS = 15 * 60
 LOGIN_SCOPE_LIMIT = 4_096
+REGISTRATION_ATTEMPT_LIMIT = max(
+    1, int(os.environ.get("AICS_REGISTRATION_ATTEMPT_LIMIT", "5"))
+)
 MAX_USERS = max(1, int(os.environ.get("AICS_MAX_USERS", "100")))
 SESSION_SECONDS = int(
     os.environ.get(
@@ -572,19 +575,13 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         return peer.compressed
 
-    def login_scopes(self, username):
-        """Hash source and account dimensions without retaining identifying values."""
-        values = (
-            "source\0" + self.login_client_address(),
-            "account\0" + username.casefold(),
-        )
-        return tuple(
-            hashlib.sha256(value.encode("utf-8")).hexdigest()
-            for value in values
-        )
+    def attempt_scope(self, purpose):
+        """Hash a request purpose and safe client address for bounded throttling."""
+        value = purpose + "\0" + self.login_client_address()
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-    def login_blocked(self, database, scope, now):
-        """Return remaining lock seconds, clearing an expired attempt window."""
+    def attempt_blocked(self, database, scope, now):
+        """Return remaining block seconds, clearing an expired attempt window."""
         row = database.execute(
             "SELECT * FROM login_attempts WHERE scope_hash=?", (scope,)
         ).fetchone()
@@ -598,8 +595,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         return 0
 
-    def record_login_failure(self, database, scope, now):
-        """Record a failed login and return lock seconds when the limit is reached."""
+    def record_attempt(self, database, scope, now, limit):
+        """Record an attempt and return block seconds when its limit is reached."""
         row = database.execute(
             "SELECT * FROM login_attempts WHERE scope_hash=?", (scope,)
         ).fetchone()
@@ -609,7 +606,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             failures = row["failures"] + 1
             window_started = row["window_started"]
-        blocked_until = now + LOGIN_LOCK_SECONDS if failures >= LOGIN_LIMIT else 0
+        blocked_until = now + LOGIN_LOCK_SECONDS if failures >= limit else 0
         database.execute(
             """
             INSERT INTO login_attempts
@@ -624,7 +621,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         return max(0, blocked_until - now)
 
-    def prune_login_attempts(self, database, now):
+    def prune_attempts(self, database, now):
         """Expire stale throttle scopes and cap storage created by changing inputs."""
         database.execute(
             """
@@ -664,43 +661,42 @@ class Handler(BaseHTTPRequestHandler):
             or len(password) > 256
         ):
             return self.json_reply(400, {"error": "Enter a username and password."})
-        scopes = self.login_scopes(username)
+        scope = self.attempt_scope("login")
         now = int(time.time())
         with connect() as database:
-            self.prune_login_attempts(database, now)
+            self.prune_attempts(database, now)
+            remaining = self.attempt_blocked(database, scope, now)
+            if remaining:
+                return self.json_reply(
+                    429,
+                    {"error": "Too many attempts. Try again later."},
+                    {"Retry-After": str(remaining)},
+                )
             user = database.execute(
                 "SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)
             ).fetchone()
-            active_scopes = scopes if user else scopes[:1]
-            remaining = max(
-                self.login_blocked(database, scope, now)
-                for scope in active_scopes
-            )
             encoded = user["password_hash"] if user else DUMMY_PASSWORD_HASH
             password_matches = verify_password(password, encoded)
             valid = bool(user and user["is_active"] and password_matches)
             if not valid:
-                lock_seconds = max(
-                    self.record_login_failure(database, scope, now)
-                    for scope in active_scopes
+                lock_seconds = self.record_attempt(
+                    database, scope, now, LOGIN_LIMIT
                 )
-                self.prune_login_attempts(database, now)
-                retry_seconds = max(remaining, lock_seconds)
-                status = 429 if retry_seconds else 401
+                self.prune_attempts(database, now)
+                status = 429 if lock_seconds else 401
                 message = (
                     "Too many attempts. Try again later."
-                    if retry_seconds
+                    if lock_seconds
                     else "Invalid username or password."
                 )
                 headers = (
-                    {"Retry-After": str(retry_seconds)}
-                    if retry_seconds
+                    {"Retry-After": str(lock_seconds)}
+                    if lock_seconds
                     else None
                 )
                 return self.json_reply(status, {"error": message}, headers)
-            database.executemany(
-                "DELETE FROM login_attempts WHERE scope_hash=?",
-                ((scope,) for scope in scopes),
+            database.execute(
+                "DELETE FROM login_attempts WHERE scope_hash=?", (scope,)
             )
             database.execute(
                 "DELETE FROM sessions WHERE expires_at<=?", (now,)
@@ -750,7 +746,9 @@ class Handler(BaseHTTPRequestHandler):
                 400, {"error": "Use a password between 12 and 256 characters."}
             )
         now = int(time.time())
+        scope = self.attempt_scope("registration")
         with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
             if not registration_enabled(database):
                 return self.json_reply(
                     403, {"error": "Registration is currently closed."}
@@ -762,6 +760,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_reply(
                     403, {"error": "Account registration has reached its limit."}
                 )
+            self.prune_attempts(database, now)
+            remaining = self.attempt_blocked(database, scope, now)
+            if remaining:
+                return self.json_reply(
+                    429,
+                    {"error": "Too many registration attempts. Try again later."},
+                    {"Retry-After": str(remaining)},
+                )
+            self.record_attempt(
+                database, scope, now, REGISTRATION_ATTEMPT_LIMIT
+            )
         password_hash = hash_password(password)
         try:
             with connect() as database:
