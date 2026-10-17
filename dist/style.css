@@ -269,7 +269,7 @@ p {
   height: 100dvh;
   flex-direction: column;
   gap: 24px;
-  overflow-y: auto;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: var(--surface);
   padding: 24px 16px;
@@ -283,9 +283,28 @@ p {
   padding: 0 7px;
 }
 
+.sidebar-mark {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+}
+
+.sidebar-tagline {
+  margin-top: 0;
+  text-align: center;
+  line-height: 1.2;
+}
+
+/* Only navigation scrolls, keeping identity anchored inside the viewport. */
 .nav {
   display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-content: start;
   gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
 
 .nav button {
@@ -327,7 +346,8 @@ p {
 .sidefoot {
   display: grid;
   gap: 4px;
-  margin-top: auto;
+  flex: 0 0 auto;
+  margin-top: 0;
   padding: 12px 9px;
   color: var(--faint);
   font-size: 0.76rem;
@@ -1272,6 +1292,7 @@ p {
 }
 
 .shell.sidebar-closed .nav-label,
+.shell.sidebar-closed .sidebar-tagline,
 .shell.sidebar-closed .sidefoot {
   display: none;
 }
@@ -1297,8 +1318,16 @@ p {
 
   .side {
     max-height: 100dvh;
-    overflow-y: auto;
-    overscroll-behavior: contain;
+    overflow: hidden;
+  }
+
+  .shell:not(.sidebar-closed) .side {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .shell:not(.sidebar-closed) .sidefoot {
+    display: grid;
   }
 
   .shell.sidebar-closed .side-top {
@@ -1312,6 +1341,8 @@ p {
   .shell:not(.sidebar-closed) .nav {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 
   .shell.sidebar-closed #navToggle span:first-child {
