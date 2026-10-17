@@ -289,11 +289,16 @@ p {
   gap: 10px;
 }
 
-.sidebar-tagline {
+.brand .sidebar-tagline {
   display: grid;
   margin-top: 0;
   text-align: left;
   line-height: 1.2;
+}
+
+.sidebar-tagline span {
+  display: block;
+  white-space: nowrap;
 }
 
 /* Only navigation scrolls, keeping identity anchored inside the viewport. */
