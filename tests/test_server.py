@@ -399,7 +399,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(session["authenticated"])
         self.assertFalse(session["registrationEnabled"])
-        self.assertEqual(session["version"], "0.3.0")
+        self.assertEqual(session["version"], "0.1.0")
 
     def test_02_admin_login_hashing_and_legacy_migration(self):
         """Hash the bootstrap password and assign legacy data to the initial admin."""
@@ -407,6 +407,7 @@ class ServerIntegrationTests(unittest.TestCase):
         status, payload, headers = admin.login(ADMIN_USERNAME, ADMIN_PASSWORD)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["user"]["role"], "admin")
+        self.assertEqual(payload["version"], "0.1.0")
         set_cookie = headers.get("Set-Cookie", "")
         self.assertIn("HttpOnly", set_cookie)
         self.assertIn("SameSite=Strict", set_cookie)
@@ -882,8 +883,8 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn(">Developed by JOR</a>", html)
         self.assertNotIn("Jomar Oliver Reyes</a>", html)
         self.assertIn('id="footerVersion"', html)
-        self.assertNotIn("0.3.0", html)
-        self.assertNotIn("0.3.0", script)
+        self.assertNotIn("0.1.0", html)
+        self.assertNotIn("0.1.0", script)
         self.assertIn('html[data-theme="light"]', css)
         self.assertIn("overflow-x: hidden", css)
         self.assertIn("min-height: 44px", css)

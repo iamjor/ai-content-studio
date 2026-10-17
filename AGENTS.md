@@ -22,7 +22,7 @@ This repository is intended to be safe to publish later. Keep sample content fic
 - Preserve existing user data. Back up persistent SQLite and image data before schema changes or deployments that could affect it.
 - Run focused checks: `node --check dist/app.js`, `node --check dist/seed.js`, `python3 -m py_compile server.py tests/test_server.py`, and `python3 -m unittest discover -s tests -v`. Build the Docker image and run a local health check where Docker is available. Mark production verification separately.
 - Do not expose the HTTP port directly to the public internet. Verify HTTPS, proxy trust, origin handling, secure cookies, authentication, backups, and rollback in the target installation.
-- Do not add a public license or change repository visibility without the owner's explicit choice.
+- The owner selected the MIT License for the first public release. Do not change the license or repository visibility without explicit owner approval.
 - Keep public documentation under `docs/`. Use `docs/TECHNICAL.md` as the canonical technical reference and keep `README.md` concise.
 
 ## Writing and code documentation

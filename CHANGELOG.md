@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0 - 2026-10-17
+
 - Replaced browser Basic Auth with an accessible in-app login and logout flow.
 - Added password hashing, server-side sessions, CSRF protection, expiry, and login throttling.
 - Added private per-user workspaces with non-destructive legacy owner migration.
@@ -14,5 +16,6 @@
 - Migrated the shared production tool catalog into administrator-managed SQLite records.
 - Replaced the spark mark with an original film and story mark and added explicit responsive sidebar controls.
 - Expanded integration tests and self-hosting, migration, backup, security, and release guidance.
+- Selected the MIT License for the first public source release.
 
-The first tag will follow separately approved deployment and browser audit.
+The first tag, visibility change, and deployment remain separately approved actions.

@@ -20,4 +20,4 @@ docker build -t ai-content-studio:review .
 
 Review phone, tablet, and desktop widths in both themes, including a long page with the sidebar open and closed. Use only fictional or approved screenshot content. Report missing runtime, browser, or Docker tooling as unverified.
 
-Explain authentication, persistence, migration, compatibility, tests, screenshots, and limitations in the pull request. Do not add a license or change visibility until the owner decides.
+Explain authentication, persistence, migration, compatibility, tests, screenshots, and limitations in the pull request. The project uses the MIT License. Do not change the license or repository visibility without owner approval.
