@@ -191,7 +191,7 @@
     render();
   }
 
-  async function showAuthenticated(payload, focusMain) {
+  async function showAuthenticated(payload, focusDestination) {
     session = payload;
     applyTheme(session.user.theme, false);
     populateAccount();
@@ -200,7 +200,7 @@
     byId("authView").classList.add("hidden");
     dismissBootstrap();
     byId("appView").classList.remove("hidden");
-    goTo("overview", focusMain);
+    goTo("overview", focusDestination);
   }
 
   function activeProject() {
@@ -237,7 +237,16 @@
     byId("navToggleText").textContent = open ? "Close sidebar" : "Open sidebar";
   }
 
-  function goTo(tab, focusMain) {
+  /** Focus a section label after its source control may have become hidden. */
+  function focusSectionHeading(tab) {
+    var section = byId(tab);
+    var heading = section && byId(section.getAttribute("aria-labelledby"));
+    if (!heading) { return; }
+    heading.tabIndex = -1;
+    heading.focus({preventScroll: true});
+  }
+
+  function goTo(tab, focusDestination) {
     document.querySelectorAll(".nav button,.section").forEach(function (element) { element.classList.remove("active"); });
     var navButton = document.querySelector('.nav button[data-tab="' + tab + '"]');
     if (navButton) { navButton.classList.add("active"); }
@@ -246,7 +255,9 @@
     if (tab === "admin" && session.user.role === "admin") { loadAdmin(); }
     if (tab === "tools") { loadTools(); }
     render();
-    if (focusMain !== false) { byId("mainContent").focus({preventScroll: true}); }
+    if (focusDestination) {
+      window.requestAnimationFrame(function () { focusSectionHeading(tab); });
+    }
   }
 
   function selectedItems(items, filter) {
@@ -422,13 +433,13 @@
   byId("themeToggle").addEventListener("click", toggleTheme);
   byId("showRegister").addEventListener("click", function () { byId("loginForm").classList.add("hidden"); byId("registrationPrompt").classList.add("hidden"); byId("registerForm").classList.remove("hidden"); byId("registerName").focus(); });
   byId("hideRegister").addEventListener("click", function () { byId("registerForm").classList.add("hidden"); byId("loginForm").classList.remove("hidden"); byId("registrationPrompt").classList.remove("hidden"); byId("loginUsername").focus(); });
-  byId("loginForm").addEventListener("submit", async function (event) { event.preventDefault(); setStatus(byId("loginStatus"), "Signing in…", ""); try { var payload = await api("/api/login", {method: "POST", body: {username: byId("loginUsername").value.trim(), password: byId("loginPassword").value}}); updateFooter(payload); await showAuthenticated(payload); byId("loginForm").reset(); } catch (error) { setStatus(byId("loginStatus"), error.message, "error"); } });
-  byId("registerForm").addEventListener("submit", async function (event) { event.preventDefault(); setStatus(byId("registerStatus"), "Creating your workspace…", ""); try { var payload = await api("/api/register", {method: "POST", body: {displayName: byId("registerName").value.trim(), username: byId("registerUsername").value.trim(), password: byId("registerPassword").value}}); updateFooter(payload); await showAuthenticated(payload); byId("registerForm").reset(); } catch (error) { setStatus(byId("registerStatus"), error.message, "error"); } });
+  byId("loginForm").addEventListener("submit", async function (event) { event.preventDefault(); setStatus(byId("loginStatus"), "Signing in…", ""); try { var payload = await api("/api/login", {method: "POST", body: {username: byId("loginUsername").value.trim(), password: byId("loginPassword").value}}); updateFooter(payload); await showAuthenticated(payload, true); byId("loginForm").reset(); } catch (error) { setStatus(byId("loginStatus"), error.message, "error"); } });
+  byId("registerForm").addEventListener("submit", async function (event) { event.preventDefault(); setStatus(byId("registerStatus"), "Creating your workspace…", ""); try { var payload = await api("/api/register", {method: "POST", body: {displayName: byId("registerName").value.trim(), username: byId("registerUsername").value.trim(), password: byId("registerPassword").value}}); updateFooter(payload); await showAuthenticated(payload, true); byId("registerForm").reset(); } catch (error) { setStatus(byId("registerStatus"), error.message, "error"); } });
   byId("logout").addEventListener("click", async function () { try { await api("/api/logout", {method: "POST", body: {}}); } catch (error) { if (error.status !== 401) { window.alert(error.message); } } showSignedOut("You have been signed out."); });
 
   setSidebar(!window.matchMedia("(max-width: 1080px)").matches);
   byId("navToggle").addEventListener("click", function () { setSidebar(byId("navToggle").getAttribute("aria-expanded") !== "true"); });
-  document.querySelectorAll(".nav button").forEach(function (button) { button.addEventListener("click", function () { goTo(button.dataset.tab); }); });
+  document.querySelectorAll(".nav button").forEach(function (button) { button.addEventListener("click", function () { goTo(button.dataset.tab, true); }); });
   ["projectFilter", "episodeFilter", "characterFilter"].forEach(function (id) { byId(id).addEventListener("change", render); });
   byId("toolFilter").addEventListener("change", renderTools);
   byId("userFilter").addEventListener("change", function () { var users = JSON.parse(byId("userList").dataset.users || "[]"); renderUsers(users); });
@@ -436,7 +447,7 @@
   document.querySelectorAll("dialog [data-cancel]").forEach(function (button) { button.addEventListener("click", function () { button.closest("dialog").close("cancel"); }); });
   document.body.addEventListener("click", async function (event) {
     var goButton = event.target.closest("[data-go]");
-    if (goButton) { goTo(goButton.dataset.go); return; }
+    if (goButton) { goTo(goButton.dataset.go, true); return; }
     if (event.target.closest("[data-new]")) { byId("projectDialog").showModal(); return; }
     var button = event.target.closest("[data-item-action]");
     if (!button) { return; }
@@ -444,7 +455,7 @@
     var list = button.dataset.kind === "project" ? state.projects : button.dataset.kind === "episode" ? project.episodes : project.characters;
     var item = list[Number(button.dataset.index)];
     if (button.dataset.itemAction === "open") {
-      if (button.dataset.kind === "project") { state.activeId = item.id; persist(); goTo("episodes"); }
+      if (button.dataset.kind === "project") { state.activeId = item.id; persist(); goTo("episodes", true); }
       else if (button.dataset.kind === "episode") { openEpisode(Number(button.dataset.index)); }
       else { openCharacter(Number(button.dataset.index)); }
       return;
@@ -460,7 +471,7 @@
   });
 
   byId("newProject").addEventListener("click", function () { byId("projectDialog").showModal(); });
-  byId("projectForm").addEventListener("submit", function () { var id = "p-" + crypto.randomUUID(); state.projects.push({id: id, title: byId("pTitle").value.trim(), genre: byId("pGenre").value.trim(), description: byId("pDescription").value.trim(), stage: "Planning", archived: false, episodes: [], characters: [], gates: []}); state.activeId = id; persist(); byId("projectForm").reset(); goTo("episodes"); });
+  byId("projectForm").addEventListener("submit", function () { var id = "p-" + crypto.randomUUID(); state.projects.push({id: id, title: byId("pTitle").value.trim(), genre: byId("pGenre").value.trim(), description: byId("pDescription").value.trim(), stage: "Planning", archived: false, episodes: [], characters: [], gates: []}); state.activeId = id; persist(); byId("projectForm").reset(); goTo("episodes", true); });
   byId("addEpisode").addEventListener("click", function () { var project = activeProject(); if (!project) { return; } var id = "EP" + String(project.episodes.length + 1).padStart(2, "0"); project.episodes.push({id: id, title: "Untitled episode", hook: "", status: "Script draft", duration: 60, script: "", assetLink: "", archived: false}); persist(); render(); openEpisode(project.episodes.length - 1); });
   byId("editForm").addEventListener("submit", function () { var episode = activeProject().episodes[editIndex]; if (!episode) { return; } episode.title = byId("eTitle").value.trim(); episode.hook = byId("hook").value.trim(); episode.status = byId("status").value; episode.duration = Number(byId("duration").value) || 60; episode.script = byId("script").value; episode.assetLink = byId("assetLink").value.trim(); persist(); render(); });
   byId("archiveEpisode").addEventListener("click", function () { var episode = activeProject().episodes[editIndex]; episode.archived = !episode.archived; persist(); render(); byId("editor").close(); });
@@ -489,7 +500,7 @@
 
   byId("export").addEventListener("click", function () { window.alert("This JSON export contains text records only. Uploaded images are not included. Back up the persistent data volume for a complete image-inclusive backup."); var clean = structuredClone(state); clean.projects.forEach(function (project) { project.characters.forEach(function (character) { delete character.hasImage; }); }); var anchor = document.createElement("a"); var url = URL.createObjectURL(new Blob([JSON.stringify(clean, null, 2)], {type: "application/json"})); anchor.href = url; anchor.download = "ai-content-studio-text-backup.json"; anchor.click(); window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000); });
   byId("import").addEventListener("click", function () { byId("file").click(); });
-  byId("file").addEventListener("change", async function (event) { var file = event.target.files && event.target.files[0]; if (!file) { return; } try { var parsed = JSON.parse(await file.text()); if (!parsed || (!Array.isArray(parsed.projects) && !Array.isArray(parsed.episodes))) { throw new Error("Invalid"); } var imported = migrateWorkspace(parsed); if (window.confirm("Replace every text record in your private workspace? Uploaded images are not restored by JSON import.")) { state = imported; await persist(); render(); goTo("overview"); } } catch (error) { window.alert("This is not a valid AI Content Studio text backup."); } event.target.value = ""; });
+  byId("file").addEventListener("change", async function (event) { var file = event.target.files && event.target.files[0]; if (!file) { return; } try { var parsed = JSON.parse(await file.text()); if (!parsed || (!Array.isArray(parsed.projects) && !Array.isArray(parsed.episodes))) { throw new Error("Invalid"); } var imported = migrateWorkspace(parsed); if (window.confirm("Replace every text record in your private workspace? Uploaded images are not restored by JSON import.")) { state = imported; await persist(); render(); goTo("overview", true); } } catch (error) { window.alert("This is not a valid AI Content Studio text backup."); } event.target.value = ""; });
 
   byId("profileForm").addEventListener("submit", async function (event) { event.preventDefault(); try { session.user = (await api("/api/account", {method: "PUT", body: {displayName: byId("accountDisplayName").value.trim()}})).user; populateAccount(); setStatus(byId("profileStatus"), "Profile saved.", "success"); } catch (error) { setStatus(byId("profileStatus"), error.message, "error"); } });
   byId("passwordForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/account", {method: "PUT", body: {currentPassword: byId("currentPassword").value, newPassword: byId("newPassword").value}}); byId("passwordForm").reset(); showSignedOut(result.message || "Password changed. Sign in again."); } catch (error) { setStatus(byId("passwordStatus"), error.message, "error"); } });
