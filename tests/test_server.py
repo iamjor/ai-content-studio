@@ -892,7 +892,16 @@ class ServerIntegrationTests(unittest.TestCase):
             '<span>WORKSPACE</span></small>',
             html,
         )
+        self.assertIn(".brand .sidebar-tagline", css)
+        self.assertIn(".sidebar-tagline span", css)
+        self.assertIn("white-space: nowrap", css)
         self.assertIn(".shell.sidebar-closed .sidebar-tagline", css)
+        self.assertIn("function goTo(tab, focusMain)", script)
+        self.assertIn("if (focusMain !== false)", script)
+        self.assertIn("showAuthenticated(payload, false)", script)
+        self.assertEqual(script.count("await showAuthenticated(payload);"), 2)
+        self.assertIn("goTo(button.dataset.tab);", script)
+        self.assertIn(":focus-visible", css)
         self.assertIn(".side {\n  position: fixed", css)
         self.assertIn(".main {\n  grid-column: 2", css)
         self.assertIn("position: sticky;\n    left: auto;\n    width: 100%", css)

@@ -184,7 +184,7 @@
     render();
   }
 
-  async function showAuthenticated(payload) {
+  async function showAuthenticated(payload, focusMain) {
     session = payload;
     byId("authView").classList.add("hidden");
     byId("appView").classList.remove("hidden");
@@ -192,7 +192,7 @@
     populateAccount();
     scheduleExpiry();
     await Promise.all([loadWorkspace(), loadTools()]);
-    goTo("overview");
+    goTo("overview", focusMain);
   }
 
   function activeProject() {
@@ -229,7 +229,7 @@
     byId("navToggleText").textContent = open ? "Close sidebar" : "Open sidebar";
   }
 
-  function goTo(tab) {
+  function goTo(tab, focusMain) {
     document.querySelectorAll(".nav button,.section").forEach(function (element) { element.classList.remove("active"); });
     var navButton = document.querySelector('.nav button[data-tab="' + tab + '"]');
     if (navButton) { navButton.classList.add("active"); }
@@ -238,7 +238,7 @@
     if (tab === "admin" && session.user.role === "admin") { loadAdmin(); }
     if (tab === "tools") { loadTools(); }
     render();
-    byId("mainContent").focus({preventScroll: true});
+    if (focusMain !== false) { byId("mainContent").focus({preventScroll: true}); }
   }
 
   function selectedItems(items, filter) {
@@ -395,7 +395,7 @@
     catch (error) { updateFooter({appName: "AI Content Studio", version: ""}); showSignedOut("The studio server is unavailable. Try again shortly."); return; }
     updateFooter(payload);
     byId("registrationPrompt").dataset.enabled = payload.registrationEnabled ? "true" : "";
-    if (payload.authenticated) { await showAuthenticated(payload); return; }
+    if (payload.authenticated) { await showAuthenticated(payload, false); return; }
     var publicTheme = "dark";
     try { publicTheme = localStorage.getItem("aics_public_theme") || "dark"; } catch (error) { publicTheme = "dark"; }
     applyTheme(publicTheme, false);
