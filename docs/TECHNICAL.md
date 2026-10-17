@@ -87,7 +87,7 @@ Monitor container health, restart behavior, persistent storage capacity, authent
 
 ## 17. Deployment and change management
 
-Build and test the exact reviewed commit. Before upgrades, stop edits and create an off-host backup. Preserve the volume and never use `docker compose down -v` during a normal update. First startup applies idempotent schema creation and migration. Validate health, HTTPS, Host and Origin behavior, cookies, authentication, migrated content, and backups before declaring rollout complete. Use the [deployment guide](DEPLOYMENT.md) for the full gate and rollback checklist.
+Build and test the exact reviewed commit. Before upgrades, stop edits and create an off-host backup. Preserve the volume and never use `docker compose down -v` during a normal update. First startup applies idempotent schema creation and migration. Validate health, HTTPS, Host and Origin behavior, cookies, authentication, migrated content, and backups before declaring rollout complete. Use the [deployment guide](DEPLOYMENT.md) for preparation and rollback checks.
 
 ## 18. Validation evidence
 
@@ -103,7 +103,7 @@ Security reporting guidance is in [SECURITY.md](SECURITY.md). Installation-speci
 
 ## 20. Roadmap and appendices
 
-Deferred possibilities include a public release, stronger account recovery and identity controls, formal API versioning, automated browser coverage, and documented recovery objectives. None is committed to a date. The owner selected the MIT License for version 0.1.0.
+Deferred possibilities include stronger account recovery and identity controls, formal API versioning, automated browser coverage, and documented recovery objectives. None is committed to a date. The owner selected the MIT License for version 0.1.0.
 
 Related references:
 
@@ -111,7 +111,6 @@ Related references:
 - [Deployment guide](DEPLOYMENT.md)
 - [Contributing guide](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
-- [Public release checklist](PUBLIC_RELEASE_CHECKLIST.md)
 - [Changelog](../CHANGELOG.md)
 
 Glossary: a workspace is one user's revisioned JSON planning document; the image root is private file storage for character references; a trusted proxy is an explicitly configured immediate network peer permitted to supply `CF-Connecting-IP`.
