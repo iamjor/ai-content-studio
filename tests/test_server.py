@@ -887,8 +887,17 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn("film and story mark", favicon_text)
         self.assertNotIn("creative spark", favicon_text)
         self.assertIn('id="navToggle"', html)
-        self.assertIn('<small class="sidebar-tagline">CREATIVE WORKSPACE</small>', html)
+        self.assertIn(
+            '<small class="sidebar-tagline"><span>CREATIVE</span>'
+            '<span>WORKSPACE</span></small>',
+            html,
+        )
         self.assertIn(".shell.sidebar-closed .sidebar-tagline", css)
+        self.assertIn(".side {\n  position: fixed", css)
+        self.assertIn(".main {\n  grid-column: 2", css)
+        self.assertIn("position: sticky;\n    left: auto;\n    width: 100%", css)
+        self.assertNotIn("var(--surface) 0 259px", css)
+        self.assertNotIn("var(--surface) 0 77px", css)
         self.assertIn("flex: 1 1 auto", css)
         self.assertIn(".shell:not(.sidebar-closed) .sidefoot", css)
         self.assertEqual(html.count('class="nav-icon"'), 8)
