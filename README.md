@@ -76,4 +76,4 @@ Review [Contributing](docs/CONTRIBUTING.md) before opening a change. Keep exampl
 
 ## License and release status
 
-The owner selected the [MIT License](LICENSE) for version 0.1.0. Once this change is merged and the repository is intentionally made public, the source is available under that license. Merging, changing visibility, tagging, and publishing a release remain separate owner-approved actions.
+The source is licensed under the [MIT License](LICENSE). See [Releases](https://github.com/iamjor/ai-content-studio/releases) for published versions. A source release does not deploy or back up any installation.
