@@ -13,7 +13,16 @@
 <body>
   <a class="skip-link" href="#mainContent">Skip to content</a>
 
-  <section class="auth-view" id="authView" aria-labelledby="authTitle">
+  <section class="bootstrap-view" id="bootstrapView" role="status" aria-live="polite" aria-busy="true" aria-labelledby="bootstrapTitle">
+    <img src="/favicon.svg" alt="" width="44" height="44">
+    <div>
+      <h1 id="bootstrapTitle">Loading studio</h1>
+      <p>Checking your session.</p>
+    </div>
+    <noscript><p class="notice">JavaScript is required to sign in. Enable JavaScript, then reload this page.</p></noscript>
+  </section>
+
+  <section class="auth-view hidden" id="authView" aria-labelledby="authTitle">
     <div class="auth-top">
       <div class="brand brand-large">
         <img src="/favicon.svg" alt="" width="44" height="44">
