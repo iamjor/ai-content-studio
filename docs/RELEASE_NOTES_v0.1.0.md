@@ -1,6 +1,6 @@
 # AI Content Studio 0.1.0 release notes
 
-Version 0.1.0 is the first prepared public source release of AI Content Studio. The repository remains private until the owner separately approves a visibility change. These notes do not authorize a merge, tag, release, deployment, or visibility change.
+Version 0.1.0 is the first public source release of AI Content Studio. Repository visibility, the GitHub Release, and individual deployments are separate operations. Check the repository and its Releases page for their current status.
 
 ## Highlights
 
@@ -56,4 +56,4 @@ If a later review finds a real credential or private data, stop the release, rev
 
 ## License
 
-The owner selected the [MIT License](../LICENSE). Once the license change is merged and the repository is intentionally made public, version 0.1.0 source is available under MIT. Tagging and publishing the release remain separate owner-approved steps.
+The version 0.1.0 source is licensed under the [MIT License](../LICENSE). A source release does not upgrade an existing installation.
