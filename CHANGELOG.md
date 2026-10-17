@@ -18,4 +18,4 @@
 - Expanded integration tests and self-hosting, migration, backup, security, and release guidance.
 - Selected the MIT License for the first public source release.
 
-The first tag, visibility change, and deployment remain separately approved actions.
+Repository visibility, a GitHub Release, and installation upgrades are separate operations.
