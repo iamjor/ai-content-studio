@@ -67,7 +67,6 @@ The project does not provide email verification, password-reset email, MFA, exte
 - [Version 0.1.0 release notes](docs/RELEASE_NOTES_v0.1.0.md)
 - [Contributing](docs/CONTRIBUTING.md)
 - [Security policy](docs/SECURITY.md)
-- [Public release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md)
 - [Changelog](CHANGELOG.md)
 
 ## Contributing
