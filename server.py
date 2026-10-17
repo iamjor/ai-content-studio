@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 APP_NAME = "AI Content Studio"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.1.0"
 ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT / "dist"
 DB_PATH = Path(os.environ.get("AICS_DB_PATH", "/data/studio.sqlite3"))

@@ -1,21 +1,23 @@
 # Public release checklist
 
-Complete this before changing repository visibility. This file does not authorize a visibility change or add a license.
+Complete this before changing repository visibility. This file does not authorize a visibility change, tag, release, or deployment.
 
 ## Source and history
 
-- [ ] Scan tracked files for credentials, tokens, private keys, `.env`, SQLite files, exports, backups, logs, personal media, hostnames, addresses, and infrastructure details.
-- [ ] Scan every reachable Git object and commit diff, not only the current tree.
-- [ ] Review ignored and untracked files before packaging artifacts.
-- [ ] Confirm commit attribution follows `AGENTS.md`.
-- [ ] Confirm no production database or volume entered development artifacts.
+- [x] Scan tracked files for credentials, tokens, private keys, `.env`, SQLite files, exports, backups, logs, personal media, hostnames, addresses, and infrastructure details.
+- [x] Scan every locally reachable Git object and commit diff, not only the current tree.
+- [x] Review ignored and untracked files before packaging artifacts.
+- [ ] Confirm commit attribution follows `AGENTS.md` for the final reviewed branch.
+- [x] Confirm no production database or volume entered development artifacts.
+
+The local audit result and its limitations are recorded in the [version 0.1.0 release notes](RELEASE_NOTES_v0.1.0.md). GitHub-hosted artifacts and repository settings require a separate authenticated review.
 
 ## Content and dependencies
 
 - [ ] Confirm all samples and screenshots are fictional or approved.
-- [ ] Confirm the favicon and interface assets are original or properly licensed.
+- [x] Confirm the favicon and interface assets are original or properly licensed.
 - [ ] Review every external link, including the verified owner portfolio.
-- [ ] Confirm the runtime has no undeclared dependency and review every dependency license.
+- [x] Confirm the runtime has no undeclared third-party library dependency.
 - [ ] Review base-image provenance and security support.
 
 ## Install and upgrade
@@ -45,8 +47,8 @@ Complete this before changing repository visibility. This file does not authoriz
 
 ## License decision
 
-Recommended starting point: **Apache License 2.0**. It is permissive, widely understood, and includes an explicit patent grant. **MIT** is a shorter permissive alternative.
+The owner selected the permissive MIT License for version 0.1.0.
 
-- [ ] Owner selects a license after reviewing goals and third-party obligations.
-- [ ] Add only the owner-approved license in a separate reviewed change.
-- [ ] Do not claim an open-source release until license and visibility are intentionally changed.
+- [x] Record the owner's license choice.
+- [x] Add the canonical MIT text with the owner's 2026 copyright notice.
+- [ ] Do not claim a completed public release until this change is merged and visibility is intentionally changed.

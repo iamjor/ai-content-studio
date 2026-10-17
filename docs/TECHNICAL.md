@@ -103,7 +103,7 @@ Security reporting guidance is in [SECURITY.md](SECURITY.md). Installation-speci
 
 ## 20. Roadmap and appendices
 
-Deferred possibilities include owner-selected licensing, public release, stronger account recovery and identity controls, formal API versioning, automated browser coverage, and documented recovery objectives. None is committed to a date.
+Deferred possibilities include a public release, stronger account recovery and identity controls, formal API versioning, automated browser coverage, and documented recovery objectives. None is committed to a date. The owner selected the MIT License for version 0.1.0.
 
 Related references:
 

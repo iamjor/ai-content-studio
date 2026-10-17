@@ -12,7 +12,7 @@ This review-only plan separates development work from a target self-hosted produ
 - [ ] Build the Docker image where Docker is available.
 - [ ] Review narrow mobile and desktop layouts in dark and light themes.
 - [ ] Complete [public release checklist](PUBLIC_RELEASE_CHECKLIST.md) before a visibility change.
-- [ ] Confirm the owner selected a license before adding one.
+- [x] Confirm the owner-selected MIT License is present.
 
 Unavailable tooling is unverified, not passed. Local header simulation does not count as live Cloudflare Tunnel verification.
 
