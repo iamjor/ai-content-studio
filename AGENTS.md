@@ -1,6 +1,6 @@
 # AI Content Studio agent notes
 
-This repository is intended to be safe to publish later. Keep sample content fictional and keep private workspace data, credentials, exports, media, and infrastructure details out of Git.
+Keep this repository safe for public release and ongoing maintenance. Keep sample content fictional and keep private workspace data, credentials, exports, media, and infrastructure details out of Git.
 
 ## Environments
 
