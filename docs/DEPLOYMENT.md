@@ -19,23 +19,23 @@ Unavailable tooling is unverified, not passed. Local header simulation does not 
 
 Run these checks on the target host before changing the installation.
 
-- [ ] record deployed and target commits.
-- [ ] inspect Docker, Compose, containers, networks, volumes, and port conflicts without changing them.
-- [ ] inspect the HTTPS proxy or tunnel privately and confirm it preserves the public Host header.
-- [ ] identify the app's immediate proxy peer and set `AICS_TRUSTED_PROXY_NETWORKS` to the smallest verified peer CIDR needed to distinguish client addresses.
-- [ ] confirm untrusted peers cannot influence `CF-Connecting-IP` at the app boundary.
-- [ ] set finite `AICS_MAX_USERS` and `AICS_REGISTRATION_ATTEMPT_LIMIT` values appropriate for the installation.
-- [ ] keep the app loopback-only or on a private container network.
-- [ ] confirm disk space and an off-server backup destination.
-- [ ] keep registration off and Secure cookies on.
+- [ ] Record deployed and target commits.
+- [ ] Inspect Docker, Compose, containers, networks, volumes, and port conflicts without changing them.
+- [ ] Inspect the HTTPS proxy or tunnel privately and confirm it preserves the public Host header.
+- [ ] Identify the app's immediate proxy peer and set `AICS_TRUSTED_PROXY_NETWORKS` to the smallest verified peer CIDR needed to distinguish client addresses.
+- [ ] Confirm untrusted peers cannot influence `CF-Connecting-IP` at the app boundary.
+- [ ] Set finite `AICS_MAX_USERS` and `AICS_REGISTRATION_ATTEMPT_LIMIT` values appropriate for the installation.
+- [ ] Keep the app loopback-only or on a private container network.
+- [ ] Confirm disk space and an off-server backup destination.
+- [ ] Keep registration off and Secure cookies on.
 
 ## 3. Backup and migration preparation
 
-- [ ] pause browser edits.
-- [ ] identify the production Compose project and volume without guessing from development.
-- [ ] create and verify a consistent off-server SQLite backup.
-- [ ] record a private rollback image or commit.
-- [ ] set the initial admin values in private `.env`.
+- [ ] Pause browser edits.
+- [ ] Identify the production Compose project and volume without guessing from development.
+- [ ] Create and verify a consistent off-server SQLite backup.
+- [ ] Record a private rollback image or commit.
+- [ ] Set the initial admin values in private `.env`.
 
 The first start creates schema version 3 and copies the shared workspace to the initial admin, adds non-destructive archive fields, seeds the SQLite tool catalog, and creates private image metadata. It leaves the legacy table unchanged and cannot overwrite a newer per-user workspace or revision.
 
@@ -43,35 +43,35 @@ The first start creates schema version 3 and copies the shared workspace to the 
 
 Carry out these steps only on an installation you administer.
 
-- [ ] fetch and build the exact reviewed commit.
-- [ ] update only AI Content Studio.
-- [ ] never run `docker compose down -v`.
-- [ ] confirm `studio_data` remains attached and contains both SQLite and the private `/data/images` directory.
-- [ ] inspect migration logs without exposing private data.
-- [ ] remove the bootstrap password after successful creation and recreate the container.
+- [ ] Fetch and build the exact reviewed commit.
+- [ ] Update only AI Content Studio.
+- [ ] Never run `docker compose down -v`.
+- [ ] Confirm `studio_data` remains attached and contains both SQLite and the private `/data/images` directory.
+- [ ] Inspect migration logs without exposing private data.
+- [ ] Remove the bootstrap password after successful creation and recreate the container.
 
 ## 5. Production verification
 
-- [ ] check Compose status and `/healthz`.
-- [ ] confirm plain HTTP is not public and HTTPS is valid.
-- [ ] verify the in-app login replaces the browser Basic Auth dialog.
-- [ ] verify concurrent login bursts stop at the source limit without password work, session creation, or HTTP 500 responses beyond that limit.
-- [ ] verify a separate trusted client can sign in, untrusted peers cannot spoof client addresses, and unauthenticated API access is rejected.
-- [ ] verify enabled registration attempt limits and the total account cap.
-- [ ] verify HTTPS Origin matches the preserved public Host and the session cookie is Secure, HttpOnly, and SameSite Strict in the deployed browser.
-- [ ] verify migrated owner data, stable IDs, revision, seeded tool catalog, and lifecycle flags.
-- [ ] test logout, expiry, CSRF, account changes, and reauthentication.
-- [ ] confirm registration is off unless intentionally opened.
-- [ ] confirm regular-user workspace and image isolation, denied admin access, user lifecycle controls, and last-admin protection.
-- [ ] test image upload, replacement, removal, persistence after container restart, and a complete volume backup and restore.
-- [ ] audit mobile and desktop layouts in both themes.
-- [ ] review logs without exposing private data.
+- [ ] Check Compose status and `/healthz`.
+- [ ] Confirm plain HTTP is not public and HTTPS is valid.
+- [ ] Verify the in-app login replaces the browser Basic Auth dialog.
+- [ ] Verify concurrent login bursts stop at the source limit without password work, session creation, or HTTP 500 responses beyond that limit.
+- [ ] Verify a separate trusted client can sign in, untrusted peers cannot spoof client addresses, and unauthenticated API access is rejected.
+- [ ] Verify enabled registration attempt limits and the total account cap.
+- [ ] Verify HTTPS Origin matches the preserved public Host and the session cookie is Secure, HttpOnly, and SameSite Strict in the deployed browser.
+- [ ] Verify migrated owner data, stable IDs, revision, seeded tool catalog, and lifecycle flags.
+- [ ] Test logout, expiry, CSRF, account changes, and reauthentication.
+- [ ] Confirm registration is off unless intentionally opened.
+- [ ] Confirm regular-user workspace and image isolation, denied admin access, user lifecycle controls, and last-admin protection.
+- [ ] Test image upload, replacement, removal, persistence after container restart, and a complete volume backup and restore.
+- [ ] Audit mobile and desktop layouts in both themes.
+- [ ] Review logs without exposing private data.
 
 ## 6. Rollback
 
-- [ ] restore the prior reviewed image while preserving the volume.
-- [ ] restore the backup only if integrity requires it.
-- [ ] preserve the failed database for diagnosis.
-- [ ] repeat health, authentication, HTTPS, and data checks.
+- [ ] Restore the prior reviewed image while preserving the volume.
+- [ ] Restore the backup only if integrity requires it.
+- [ ] Preserve the failed database for diagnosis.
+- [ ] Repeat health, authentication, HTTPS, and data checks.
 
 Keep hostnames, addresses, credentials, policies, and topology in a private operations record.
