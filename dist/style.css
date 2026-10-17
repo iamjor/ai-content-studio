@@ -171,6 +171,34 @@ p {
   font-size: 1.08rem;
 }
 
+.bootstrap-view {
+  display: grid;
+  width: min(100% - 36px, 440px);
+  margin: auto;
+  justify-items: center;
+  gap: 14px;
+  padding: 36px;
+  text-align: center;
+}
+
+.bootstrap-view img {
+  border-radius: 12px;
+}
+
+.bootstrap-view h1 {
+  margin: 0 0 6px;
+  font-size: clamp(1.35rem, 5vw, 1.8rem);
+}
+
+.bootstrap-view p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.bootstrap-view noscript {
+  width: 100%;
+}
+
 .auth-view {
   width: min(100%, 1040px);
   margin: auto;

@@ -870,6 +870,12 @@ class ServerIntegrationTests(unittest.TestCase):
 
         self.assertIn("width=device-width", html)
         self.assertIn('rel="icon"', html)
+        self.assertIn('class="bootstrap-view" id="bootstrapView" role="status"', html)
+        self.assertIn('aria-live="polite" aria-busy="true"', html)
+        self.assertIn('id="bootstrapTitle">Loading studio</h1>', html)
+        self.assertIn('<section class="auth-view hidden" id="authView"', html)
+        self.assertIn('<div class="app-view hidden" id="appView">', html)
+        self.assertIn("JavaScript is required to sign in", html)
         self.assertIn('id="loginThemeToggle"', html)
         self.assertIn('id="themeToggle"', html)
         self.assertIn("https://www.jomaroliverreyes.com/", html)
@@ -899,6 +905,11 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn("function goTo(tab, focusMain)", script)
         self.assertIn("if (focusMain !== false)", script)
         self.assertIn("showAuthenticated(payload, false)", script)
+        self.assertIn('byId("bootstrapView").classList.add("hidden")', script)
+        self.assertLess(
+            script.index("applyTheme(session.user.theme, false)"),
+            script.index('byId("appView").classList.remove("hidden")'),
+        )
         self.assertEqual(script.count("await showAuthenticated(payload);"), 2)
         self.assertIn("goTo(button.dataset.tab);", script)
         self.assertIn(":focus-visible", css)

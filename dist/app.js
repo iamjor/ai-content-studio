@@ -142,11 +142,18 @@
     }, Math.min(delay, 2147483647));
   }
 
+  /** Hide the neutral startup status after the destination view is ready. */
+  function dismissBootstrap() {
+    byId("bootstrapView").setAttribute("aria-busy", "false");
+    byId("bootstrapView").classList.add("hidden");
+  }
+
   function showSignedOut(message) {
     session = null;
     state = null;
     revision = 0;
     saveFailed = false;
+    dismissBootstrap();
     byId("appView").classList.add("hidden");
     byId("authView").classList.remove("hidden");
     byId("loginPassword").value = "";
@@ -186,12 +193,13 @@
 
   async function showAuthenticated(payload, focusMain) {
     session = payload;
-    byId("authView").classList.add("hidden");
-    byId("appView").classList.remove("hidden");
     applyTheme(session.user.theme, false);
     populateAccount();
     scheduleExpiry();
     await Promise.all([loadWorkspace(), loadTools()]);
+    byId("authView").classList.add("hidden");
+    dismissBootstrap();
+    byId("appView").classList.remove("hidden");
     goTo("overview", focusMain);
   }
 
@@ -391,11 +399,19 @@
   async function bootstrap() {
     byId("footerYear").textContent = String(new Date().getFullYear());
     var payload;
-    try { payload = await api("/api/session"); }
-    catch (error) { updateFooter({appName: "AI Content Studio", version: ""}); showSignedOut("The studio server is unavailable. Try again shortly."); return; }
-    updateFooter(payload);
-    byId("registrationPrompt").dataset.enabled = payload.registrationEnabled ? "true" : "";
-    if (payload.authenticated) { await showAuthenticated(payload, false); return; }
+    try {
+      payload = await api("/api/session");
+      updateFooter(payload);
+      byId("registrationPrompt").dataset.enabled = payload.registrationEnabled ? "true" : "";
+      if (payload.authenticated) { await showAuthenticated(payload, false); return; }
+    } catch (error) {
+      updateFooter({appName: "AI Content Studio", version: ""});
+      var fallbackTheme = "dark";
+      try { fallbackTheme = localStorage.getItem("aics_public_theme") || "dark"; } catch (storageError) { fallbackTheme = "dark"; }
+      applyTheme(fallbackTheme, false);
+      showSignedOut("The studio server is unavailable. Try again shortly.");
+      return;
+    }
     var publicTheme = "dark";
     try { publicTheme = localStorage.getItem("aics_public_theme") || "dark"; } catch (error) { publicTheme = "dark"; }
     applyTheme(publicTheme, false);
