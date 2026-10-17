@@ -141,6 +141,11 @@ p {
   outline-offset: 3px;
 }
 
+/* Keep the skip target focusable without outlining the full-height landmark. */
+#mainContent:focus-visible {
+  outline: none;
+}
+
 .brand {
   display: flex;
   min-width: 0;
