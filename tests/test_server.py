@@ -270,6 +270,54 @@ class LoginThrottleUnitTests(unittest.TestCase):
             self.assertEqual(handler.login_client_address(), "203.0.113.25")
 
 
+class WorkspacePlanningMigrationTests(unittest.TestCase):
+    """Verify v0.2 defaults preserve owner-entered legacy planning records."""
+
+    def test_normalization_preserves_legacy_text_ids_and_adds_planning_fields(self):
+        """Migrate old JSON without rewriting descriptions, hooks, or scripts."""
+        legacy = {
+            "projects": [{
+                "id": "existing-project",
+                "title": "Existing project",
+                "description": "Owner description",
+                "episodes": [{
+                    "id": "EP06",
+                    "title": "Existing episode",
+                    "hook": "Owner hook",
+                    "script": "Owner full script",
+                }],
+                "characters": [{
+                    "id": "existing-character",
+                    "name": "Existing character",
+                    "look": "Fixed appearance",
+                }],
+            }],
+            "activeId": "existing-project",
+        }
+
+        migrated, changed = server.normalize_workspace_data(legacy)
+
+        self.assertTrue(changed)
+        project = migrated["projects"][0]
+        episode = project["episodes"][0]
+        character = project["characters"][0]
+        self.assertEqual(project["id"], "existing-project")
+        self.assertEqual(project["description"], "Owner description")
+        self.assertEqual(episode["id"], "EP06")
+        self.assertEqual(episode["hook"], "Owner hook")
+        self.assertEqual(episode["script"], "Owner full script")
+        self.assertEqual(episode["synopsis"], "")
+        self.assertEqual(episode["beats"], "")
+        self.assertEqual(episode["shots"], [])
+        self.assertEqual(project["prompts"], [])
+        self.assertEqual(project["bible"]["seasonArc"], "")
+        self.assertEqual(character["referenceRequirements"], "")
+        self.assertEqual(character["continuity"]["mustKeep"], "")
+
+        _, changed_again = server.normalize_workspace_data(migrated)
+        self.assertFalse(changed_again)
+
+
 class ServerIntegrationTests(unittest.TestCase):
     """Exercise public defaults and authenticated behavior against a real server."""
 
@@ -399,7 +447,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(session["authenticated"])
         self.assertFalse(session["registrationEnabled"])
-        self.assertEqual(session["version"], "0.1.0")
+        self.assertEqual(session["version"], "0.2.0")
 
     def test_02_admin_login_hashing_and_legacy_migration(self):
         """Hash the bootstrap password and assign legacy data to the initial admin."""
@@ -407,7 +455,7 @@ class ServerIntegrationTests(unittest.TestCase):
         status, payload, headers = admin.login(ADMIN_USERNAME, ADMIN_PASSWORD)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["user"]["role"], "admin")
-        self.assertEqual(payload["version"], "0.1.0")
+        self.assertEqual(payload["version"], "0.2.0")
         set_cookie = headers.get("Set-Cookie", "")
         self.assertIn("HttpOnly", set_cookie)
         self.assertIn("SameSite=Strict", set_cookie)
@@ -421,6 +469,9 @@ class ServerIntegrationTests(unittest.TestCase):
             workspace["data"]["projects"][0]["title"],
             self.legacy_workspace["projects"][0]["title"],
         )
+        self.assertEqual(workspace["data"]["projects"][0]["prompts"], [])
+        self.assertEqual(workspace["data"]["projects"][0]["bible"]["logline"], "")
+        self.assertEqual(workspace["data"]["projects"][0]["gates"], [])
 
         with sqlite3.connect(self.database_path) as database:
             stored = database.execute(
@@ -430,9 +481,13 @@ class ServerIntegrationTests(unittest.TestCase):
             legacy_count = database.execute(
                 "SELECT COUNT(*) FROM workspace"
             ).fetchone()[0]
+            schema_version = database.execute(
+                "SELECT value FROM app_settings WHERE key='schema_version'"
+            ).fetchone()[0]
         self.assertTrue(stored.startswith("pbkdf2_sha256$"))
         self.assertNotIn(ADMIN_PASSWORD, stored)
         self.assertEqual(legacy_count, 1)
+        self.assertEqual(schema_version, "4")
 
     def test_03_registration_policy_and_roles(self):
         """Keep signup admin-controlled and never accept a requested admin role."""
@@ -479,7 +534,22 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         first_data = {
             "projects": [
-                {"id": "a", "title": "Alice story", "episodes": [], "characters": []}
+                {
+                    "id": "a", "title": "Alice story",
+                    "bible": {"logline": "Alice private logline"},
+                    "prompts": [{"id": "prompt-a", "name": "Alice prompt", "body": "Private prompt"}],
+                    "episodes": [{
+                        "id": "EP01", "title": "Alice episode",
+                        "hook": "Unchanged hook", "script": "Unchanged script",
+                        "synopsis": "Private synopsis", "beats": "Beat one",
+                        "shots": [{"id": "shot-a", "imagePrompt": "Private image prompt"}],
+                    }],
+                    "characters": [{
+                        "id": "alice-character", "name": "Alice character",
+                        "referenceRequirements": "Private image plan",
+                        "continuity": {"mustKeep": "Blue coat"},
+                    }],
+                }
             ],
             "activeId": "a",
         }
@@ -502,14 +572,18 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual((status, saved["revision"]), (200, 1))
 
-        self.assertEqual(
-            first.request("/api/workspace")[1]["data"]["projects"][0]["title"],
-            "Alice story",
-        )
+        first_loaded = first.request("/api/workspace")[1]["data"]["projects"][0]
+        self.assertEqual(first_loaded["title"], "Alice story")
+        self.assertEqual(first_loaded["episodes"][0]["hook"], "Unchanged hook")
+        self.assertEqual(first_loaded["episodes"][0]["script"], "Unchanged script")
+        self.assertEqual(first_loaded["episodes"][0]["synopsis"], "Private synopsis")
+        self.assertEqual(first_loaded["episodes"][0]["shots"][0]["imagePrompt"], "Private image prompt")
+        self.assertEqual(first_loaded["prompts"][0]["body"], "Private prompt")
         self.assertEqual(
             second.request("/api/workspace")[1]["data"]["projects"][0]["title"],
             "Bob story",
         )
+        self.assertNotIn("Alice private logline", json.dumps(second.request("/api/workspace")[1]))
         status, _, _ = first.request(
             "/api/workspace",
             method="PUT",
@@ -927,7 +1001,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertNotIn("var(--surface) 0 77px", css)
         self.assertIn("flex: 1 1 auto", css)
         self.assertIn(".shell:not(.sidebar-closed) .sidefoot", css)
-        self.assertEqual(html.count('class="nav-icon"'), 8)
+        self.assertEqual(html.count('class="nav-icon"'), 9)
         self.assertNotIn('<span class="n">01</span>', html)
         self.assertIn('class="footer-line"', html)
         self.assertIn('id="toolDialog"', html)
@@ -937,6 +1011,15 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn('id="projectFilter"', html)
         self.assertIn('id="cImage"', html)
         self.assertIn("Uploaded images are not included", script)
+        self.assertIn('id="pLogline"', html)
+        self.assertIn('id="episodeSynopsis"', html)
+        self.assertIn('id="episodeBeats"', html)
+        self.assertIn('id="shotList"', html)
+        self.assertIn('id="promptGrid"', html)
+        self.assertIn('id="gateList"', html)
+        self.assertIn("one approved PNG", html)
+        self.assertIn("navigator.clipboard.writeText", script)
+        self.assertIn("structuredClone(editingShots)", script)
     def reset_regular_users(self):
         """Remove prior test accounts while retaining the initial administrator."""
         with sqlite3.connect(self.database_path) as database:

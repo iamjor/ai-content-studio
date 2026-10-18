@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-10-18
+
+- Added editable project details and structured project Bible sections.
+- Added separate episode synopsis and beat outline fields without changing hooks or scripts.
+- Added compact, reorderable shot plans with prompt snapshots, settings, assets, review links, and status.
+- Added project-scoped reusable prompt libraries with copy actions and update timestamps.
+- Added character reference requirements and continuity locks while retaining one private approved image per character.
+- Added editable project production gates, project links, and explicit shot progress.
+- Added non-destructive workspace normalization and schema version 4 migration coverage.
+- Prepared release documentation for v0.2.0 without creating a tag or GitHub Release.
+
 ## 0.1.0 - 2026-10-17
 
 - Replaced browser Basic Auth with an accessible in-app login and logout flow.

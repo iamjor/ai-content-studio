@@ -1431,3 +1431,89 @@ p {
     grid-template-columns: 1fr;
   }
 }
+
+/* v0.2 planning editors keep long-form records readable on phones and desktops. */
+#projectDialog,
+#editor,
+#characterDialog {
+  width: min(920px, calc(100vw - 28px));
+}
+
+.compact-row {
+  margin-bottom: 12px;
+}
+
+.shot-list {
+  display: grid;
+  gap: 14px;
+}
+
+.shot-card {
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  padding: 16px;
+}
+
+.shot-card legend {
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.shot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.prompt-card pre {
+  max-height: 13rem;
+  overflow: auto;
+  border-radius: 9px;
+  background: var(--bg);
+  padding: 12px;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.gate-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  padding: 12px;
+}
+
+.gate-row input[type="text"] {
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 9px 11px;
+  font-size: max(16px, 1em);
+}
+
+.workflow-links {
+  margin-bottom: 28px;
+}
+
+@media (max-width: 520px) {
+  .shot-actions,
+  .workflow-links { display: grid; grid-template-columns: 1fr; }
+  .shot-actions .btn,
+  .workflow-links .btn { width: 100%; }
+  .gate-row { grid-template-columns: auto minmax(0, 1fr); }
+  .gate-row .btn { grid-column: 1 / -1; width: 100%; }
+}
