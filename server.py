@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 APP_NAME = "AI Content Studio"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT / "dist"
 DB_PATH = Path(os.environ.get("AICS_DB_PATH", "/data/studio.sqlite3"))
@@ -196,7 +196,7 @@ def detect_image_type(data):
 
 
 def normalize_workspace_data(data):
-    """Add lifecycle and character IDs without replacing existing workspace IDs."""
+    """Add compatible planning defaults without replacing existing records or IDs."""
     if not isinstance(data, dict) or not isinstance(data.get("projects"), list):
         return data, False
     changed = False
@@ -206,10 +206,43 @@ def normalize_workspace_data(data):
         if "archived" not in project:
             project["archived"] = False
             changed = True
-        for episode in project.get("episodes", []):
-            if isinstance(episode, dict) and "archived" not in episode:
-                episode["archived"] = False
+        if not isinstance(project.get("bible"), dict):
+            project["bible"] = {}
+            changed = True
+        for field in (
+            "logline",
+            "premise",
+            "seasonArc",
+            "worldRules",
+            "toneStyle",
+            "audience",
+            "language",
+            "aspectRatio",
+            "productionConstraints",
+        ):
+            if field not in project["bible"]:
+                project["bible"][field] = ""
                 changed = True
+        if not isinstance(project.get("prompts"), list):
+            project["prompts"] = []
+            changed = True
+        if not isinstance(project.get("gates"), list):
+            project["gates"] = []
+            changed = True
+        for episode in project.get("episodes", []):
+            if not isinstance(episode, dict):
+                continue
+            for field, default in (
+                ("archived", False),
+                ("synopsis", ""),
+                ("beats", ""),
+                ("shots", []),
+            ):
+                if field not in episode or (
+                    field == "shots" and not isinstance(episode[field], list)
+                ):
+                    episode[field] = default
+                    changed = True
         for character in project.get("characters", []):
             if not isinstance(character, dict):
                 continue
@@ -219,6 +252,16 @@ def normalize_workspace_data(data):
             if "archived" not in character:
                 character["archived"] = False
                 changed = True
+            if "referenceRequirements" not in character:
+                character["referenceRequirements"] = ""
+                changed = True
+            if not isinstance(character.get("continuity"), dict):
+                character["continuity"] = {}
+                changed = True
+            for field in ("mustKeep", "mustAvoid", "wardrobeVariants", "voice"):
+                if field not in character["continuity"]:
+                    character["continuity"][field] = ""
+                    changed = True
     if data["projects"] and not any(
         project.get("id") == data.get("activeId")
         for project in data["projects"]
@@ -350,7 +393,7 @@ def setup():
                 "registration_enabled",
                 "1" if REGISTRATION_DEFAULT else "0",
             )
-        set_setting(database, "schema_version", "3")
+        set_setting(database, "schema_version", "4")
 
         admin = database.execute(
             "SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1"

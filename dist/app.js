@@ -8,6 +8,9 @@
   var saveFailed = false;
   var editIndex = -1;
   var characterIndex = -1;
+  var projectIndex = -1;
+  var promptIndex = -1;
+  var editingShots = [];
   var expiryTimer = null;
   var toolRecords = [];
   var statuses = [
@@ -68,19 +71,36 @@
       id: "sample-series", title: "Sample series", genre: "AI microdrama",
       description: "A fictional starter project. Replace or edit it for your own story.",
       stage: "Planning", archived: false, episodes: structuredClone(seed.episodes),
-      characters: structuredClone(seed.characters), gates: structuredClone(seed.gates)
+      characters: structuredClone(seed.characters), gates: structuredClone(seed.gates),
+      bible: {}, prompts: []
     };
   }
 
+  /** Add v0.2 planning fields while retaining every legacy value and identifier. */
   function normalizeProject(project) {
     project.episodes = Array.isArray(project.episodes) ? project.episodes : [];
     project.characters = Array.isArray(project.characters) ? project.characters : [];
     project.gates = Array.isArray(project.gates) ? project.gates : [];
+    project.prompts = Array.isArray(project.prompts) ? project.prompts : [];
+    project.bible = project.bible && typeof project.bible === "object" ? project.bible : {};
+    ["logline", "premise", "seasonArc", "worldRules", "toneStyle", "audience", "language", "aspectRatio", "productionConstraints"].forEach(function (field) {
+      if (typeof project.bible[field] !== "string") { project.bible[field] = ""; }
+    });
     project.archived = Boolean(project.archived);
-    project.episodes.forEach(function (episode) { episode.archived = Boolean(episode.archived); });
+    project.episodes.forEach(function (episode) {
+      episode.archived = Boolean(episode.archived);
+      episode.synopsis = typeof episode.synopsis === "string" ? episode.synopsis : "";
+      episode.beats = typeof episode.beats === "string" ? episode.beats : "";
+      episode.shots = Array.isArray(episode.shots) ? episode.shots : [];
+    });
     project.characters.forEach(function (character) {
       character.id = character.id || "c-" + crypto.randomUUID();
       character.archived = Boolean(character.archived);
+      character.referenceRequirements = typeof character.referenceRequirements === "string" ? character.referenceRequirements : "";
+      character.continuity = character.continuity && typeof character.continuity === "object" ? character.continuity : {};
+      ["mustKeep", "mustAvoid", "wardrobeVariants", "voice"].forEach(function (field) {
+        if (typeof character.continuity[field] !== "string") { character.continuity[field] = ""; }
+      });
     });
   }
 
@@ -267,7 +287,63 @@
   }
 
   function actions(kind, index, archived) {
-    return '<div class="card-actions"><button class="btn" type="button" data-item-action="open" data-kind="' + kind + '" data-index="' + index + '">' + (kind === "project" ? "Open" : "Edit") + '</button><button class="btn" type="button" data-item-action="' + (archived ? "restore" : "archive") + '" data-kind="' + kind + '" data-index="' + index + '">' + (archived ? "Restore" : "Archive") + '</button><button class="btn danger" type="button" data-item-action="delete" data-kind="' + kind + '" data-index="' + index + '">Delete</button></div>';
+    var primary = '<button class="btn" type="button" data-item-action="open" data-kind="' + kind + '" data-index="' + index + '">' + (kind === "project" ? "Open" : "Edit") + '</button>';
+    if (kind === "project") { primary += '<button class="btn" type="button" data-item-action="edit" data-kind="project" data-index="' + index + '">Edit project</button>'; }
+    return '<div class="card-actions">' + primary + '<button class="btn" type="button" data-item-action="' + (archived ? "restore" : "archive") + '" data-kind="' + kind + '" data-index="' + index + '">' + (archived ? "Restore" : "Archive") + '</button><button class="btn danger" type="button" data-item-action="delete" data-kind="' + kind + '" data-index="' + index + '">Delete</button></div>';
+  }
+
+  /** Open project creation or editing without cloning an existing project. */
+  function openProject(index) {
+    projectIndex = index;
+    var project = index >= 0 ? state.projects[index] : {title: "", genre: "", description: "", stage: "Planning", bible: {}};
+    var bible = project.bible || {};
+    byId("projectModalTitle").textContent = index >= 0 ? "Edit project" : "Create project";
+    byId("pTitle").value = project.title || "";
+    byId("pGenre").value = project.genre || "";
+    byId("pDescription").value = project.description || "";
+    byId("pStage").value = project.stage || "Planning";
+    byId("pLogline").value = bible.logline || "";
+    byId("pPremise").value = bible.premise || "";
+    byId("pSeasonArc").value = bible.seasonArc || "";
+    byId("pWorldRules").value = bible.worldRules || "";
+    byId("pToneStyle").value = bible.toneStyle || "";
+    byId("pAudience").value = bible.audience || "";
+    byId("pLanguage").value = bible.language || "";
+    byId("pAspectRatio").value = bible.aspectRatio || "";
+    byId("pConstraints").value = bible.productionConstraints || "";
+    byId("projectDialog").showModal();
+    byId("pTitle").focus();
+  }
+
+  /** Render temporary shot drafts so Cancel leaves the saved episode unchanged. */
+  function renderShots() {
+    byId("shotList").innerHTML = editingShots.length ? editingShots.map(function (shot, index) {
+      var options = '<option value="">No linked prompt</option>' + activeProject().prompts.map(function (prompt) { return '<option value="' + escapeHtml(prompt.id) + '"' + (shot.promptId === prompt.id ? " selected" : "") + '>' + escapeHtml(prompt.name) + '</option>'; }).join("");
+      return '<fieldset class="shot-card" data-shot-index="' + index + '"><legend>Shot ' + (index + 1) + '</legend><div class="shot-actions"><button class="btn" type="button" data-shot-action="up"' + (index === 0 ? " disabled" : "") + '>Up</button><button class="btn" type="button" data-shot-action="down"' + (index === editingShots.length - 1 ? " disabled" : "") + '>Down</button><button class="btn danger" type="button" data-shot-action="remove">Remove</button></div><div class="settings-grid"><label class="field">Time range<input data-shot-field="timeRange" maxlength="40" value="' + escapeHtml(shot.timeRange) + '" placeholder="0:00-0:05"></label><label class="field">Status<select data-shot-field="status"><option' + (shot.status === "Planned" ? " selected" : "") + '>Planned</option><option' + (shot.status === "In progress" ? " selected" : "") + '>In progress</option><option' + (shot.status === "Ready for review" ? " selected" : "") + '>Ready for review</option><option' + (shot.status === "Approved" ? " selected" : "") + '>Approved</option></select></label></div><label class="field">Visual beat<textarea class="textarea-short" data-shot-field="visualBeat">' + escapeHtml(shot.visualBeat) + '</textarea></label><label class="field">Camera / action<textarea class="textarea-short" data-shot-field="cameraAction">' + escapeHtml(shot.cameraAction) + '</textarea></label><label class="field">Dialogue / voiceover<textarea class="textarea-short" data-shot-field="dialogue">' + escapeHtml(shot.dialogue) + '</textarea></label><label class="field">SFX / music notes<textarea class="textarea-short" data-shot-field="audioNotes">' + escapeHtml(shot.audioNotes) + '</textarea></label><label class="field">Linked reusable prompt<select data-shot-field="promptId">' + options + '</select></label><label class="field">Final text-to-image prompt<textarea data-shot-field="imagePrompt">' + escapeHtml(shot.imagePrompt) + '</textarea></label><label class="field">Final image-to-video prompt<textarea data-shot-field="videoPrompt">' + escapeHtml(shot.videoPrompt) + '</textarea></label><label class="field">Reference asset IDs / private links<textarea class="textarea-short" data-shot-field="referenceAssets">' + escapeHtml(shot.referenceAssets) + '</textarea></label><label class="field">Model / settings<textarea class="textarea-short" data-shot-field="modelSettings">' + escapeHtml(shot.modelSettings) + '</textarea></label><label class="field">Output / review link<input data-shot-field="outputLink" maxlength="1000" value="' + escapeHtml(shot.outputLink) + '"></label></fieldset>';
+    }).join("") : '<div class="card empty"><h3>No shots yet</h3><p>Add only the shots needed for a practical short-form plan.</p></div>';
+  }
+
+  /** Capture visible shot fields before reordering or saving the episode. */
+  function collectShots() {
+    byId("shotList").querySelectorAll("[data-shot-index]").forEach(function (card) {
+      var shot = editingShots[Number(card.dataset.shotIndex)];
+      card.querySelectorAll("[data-shot-field]").forEach(function (field) { shot[field.dataset.shotField] = field.value; });
+    });
+  }
+
+  /** Open one project-scoped reusable prompt for editing. */
+  function openPrompt(index) {
+    promptIndex = index;
+    var prompt = index >= 0 ? activeProject().prompts[index] : {name: "", category: "Style", purpose: "", body: "", modelSettings: ""};
+    byId("promptModalTitle").textContent = index >= 0 ? "Edit prompt" : "Add prompt";
+    byId("promptName").value = prompt.name;
+    byId("promptCategory").value = prompt.category || "Style";
+    byId("promptPurpose").value = prompt.purpose || "";
+    byId("promptBody").value = prompt.body || "";
+    byId("promptSettings").value = prompt.modelSettings || "";
+    byId("deletePrompt").classList.toggle("hidden", index < 0);
+    byId("promptDialog").showModal();
+    byId("promptName").focus();
   }
 
   function render() {
@@ -293,12 +369,19 @@
     var hasProject = Boolean(project);
     byId("addEpisode").disabled = !hasProject;
     byId("addCharacter").disabled = !hasProject;
+    byId("addPrompt").disabled = !hasProject;
+    byId("addGate").disabled = !hasProject;
     byId("activeTitle").textContent = hasProject ? project.title : "No project selected";
     byId("activeMeta").textContent = hasProject ? (project.genre || "Untitled format") + " · " + project.episodes.filter(function (item) { return !item.archived; }).length + " active episodes" : "Create a project to add episodes.";
     byId("characterTitle").textContent = hasProject ? project.title : "No project selected";
+    byId("promptProjectTitle").textContent = hasProject ? project.title : "No project selected";
+    byId("workflowProjectTitle").textContent = hasProject ? project.title : "No project selected";
     if (!project) {
       byId("episodeGrid").innerHTML = '<div class="card empty"><h3>No project yet</h3><p>Create a project before adding episodes.</p></div>';
       byId("characterGrid").innerHTML = '<div class="card empty"><h3>No project yet</h3><p>Create a project before adding characters.</p></div>';
+      byId("promptGrid").innerHTML = '<div class="card empty"><h3>No project yet</h3><p>Create a project before saving prompts.</p></div>';
+      byId("gateList").innerHTML = '<div class="card empty"><h3>No project yet</h3><p>Create a project before tracking production gates.</p></div>';
+      byId("workflowShotSummary").textContent = "Create a project to track shot progress.";
       return;
     }
 
@@ -316,6 +399,17 @@
       var image = character.hasImage ? '<img class="character-thumb" src="/api/characters/' + encodeURIComponent(character.id) + '/image" alt="Reference for ' + escapeHtml(character.name) + '">' : "";
       return '<article class="card">' + image + '<div class="kicker">' + escapeHtml(character.role || "Character") + ' · ' + escapeHtml(character.age || "") + '</div><h3>' + escapeHtml(character.name) + '</h3><p>' + escapeHtml(character.look) + '</p><span class="badge ' + (character.archived ? "" : "amber") + '">' + (character.archived ? "Archived" : escapeHtml(character.state || "Written canon only")) + '</span>' + (reference ? '<p><a href="' + escapeHtml(reference) + '" target="_blank" rel="noopener noreferrer">Reference link</a></p>' : "") + actions("character", index, character.archived) + '</article>';
     }).join("") : '<div class="card empty"><h3>No characters in this view</h3><p>Add a character or change the filter.</p></div>';
+
+    byId("promptGrid").innerHTML = project.prompts.length ? project.prompts.map(function (prompt, index) {
+      return '<article class="card prompt-card"><div class="kicker">' + escapeHtml(prompt.category || "Other") + '</div><h3>' + escapeHtml(prompt.name) + '</h3><p>' + escapeHtml(prompt.purpose || "Reusable project prompt") + '</p><pre>' + escapeHtml(prompt.body) + '</pre><p class="muted">Updated ' + escapeHtml(prompt.updatedAt || "Not recorded") + '</p><div class="card-actions"><button class="btn" type="button" data-prompt-action="copy" data-index="' + index + '">Copy</button><button class="btn" type="button" data-prompt-action="edit" data-index="' + index + '">Edit</button></div></article>';
+    }).join("") : '<div class="card empty"><h3>No saved prompts</h3><p>Add a reusable style, subject, location, image, video, or negative prompt.</p></div>';
+
+    var shots = project.episodes.reduce(function (all, episode) { return all.concat(episode.shots || []); }, []);
+    var approvedShots = shots.filter(function (shot) { return shot.status === "Approved"; }).length;
+    byId("workflowShotSummary").textContent = shots.length + " shots planned, " + approvedShots + " approved. Episode status requires an explicit owner selection.";
+    byId("gateList").innerHTML = project.gates.length ? project.gates.map(function (gate, index) {
+      return '<article class="gate-row"><input aria-label="Gate complete" type="checkbox" data-gate-done="' + index + '"' + (gate.done ? " checked" : "") + '><input aria-label="Gate name" type="text" maxlength="160" data-gate-name="' + index + '" value="' + escapeHtml(gate.name) + '"><button class="btn danger" type="button" data-gate-remove="' + index + '">Remove</button></article>';
+    }).join("") : '<div class="card empty"><h3>No production gates</h3><p>Add the manual review decisions this project needs.</p></div>';
   }
 
   function openEpisode(index) {
@@ -325,10 +419,14 @@
     byId("modalTitle").textContent = episode.title;
     byId("eTitle").value = episode.title;
     byId("hook").value = episode.hook || "";
+    byId("episodeSynopsis").value = episode.synopsis || "";
+    byId("episodeBeats").value = episode.beats || "";
     byId("status").value = episode.status || "Script draft";
     byId("duration").value = episode.duration || 60;
     byId("script").value = episode.script || "";
     byId("assetLink").value = episode.assetLink || "";
+    editingShots = structuredClone(episode.shots || []);
+    renderShots();
     byId("archiveEpisode").textContent = episode.archived ? "Restore" : "Archive";
     byId("editor").showModal();
   }
@@ -341,10 +439,16 @@
     byId("cRole").value = character.role;
     byId("cAge").value = character.age;
     byId("cLook").value = character.look;
+    byId("cReferenceRequirements").value = character.referenceRequirements || "";
+    byId("cMustKeep").value = (character.continuity || {}).mustKeep || "";
+    byId("cMustAvoid").value = (character.continuity || {}).mustAvoid || "";
+    byId("cWardrobe").value = (character.continuity || {}).wardrobeVariants || "";
+    byId("cVoice").value = (character.continuity || {}).voice || "";
     byId("cState").value = character.state;
     byId("cLink").value = character.link || "";
     byId("cImage").value = "";
     byId("characterImageActions").classList.toggle("hidden", !character.hasImage);
+    byId("viewCharacterImage").href = character.hasImage ? "/api/characters/" + encodeURIComponent(character.id) + "/image" : "";
     byId("deleteCharacter").classList.toggle("hidden", index < 0);
     byId("archiveCharacter").classList.toggle("hidden", index < 0);
     byId("archiveCharacter").textContent = character.archived ? "Restore" : "Archive";
@@ -448,12 +552,14 @@
   document.body.addEventListener("click", async function (event) {
     var goButton = event.target.closest("[data-go]");
     if (goButton) { goTo(goButton.dataset.go, true); return; }
-    if (event.target.closest("[data-new]")) { byId("projectDialog").showModal(); return; }
+    if (event.target.closest("[data-open-bible]") && activeProject()) { openProject(state.projects.indexOf(activeProject())); return; }
+    if (event.target.closest("[data-new]")) { openProject(-1); return; }
     var button = event.target.closest("[data-item-action]");
     if (!button) { return; }
     var project = activeProject();
     var list = button.dataset.kind === "project" ? state.projects : button.dataset.kind === "episode" ? project.episodes : project.characters;
     var item = list[Number(button.dataset.index)];
+    if (button.dataset.itemAction === "edit" && button.dataset.kind === "project") { openProject(Number(button.dataset.index)); return; }
     if (button.dataset.itemAction === "open") {
       if (button.dataset.kind === "project") { state.activeId = item.id; persist(); goTo("episodes", true); }
       else if (button.dataset.kind === "episode") { openEpisode(Number(button.dataset.index)); }
@@ -470,18 +576,62 @@
     render();
   });
 
-  byId("newProject").addEventListener("click", function () { byId("projectDialog").showModal(); });
-  byId("projectForm").addEventListener("submit", function () { var id = "p-" + crypto.randomUUID(); state.projects.push({id: id, title: byId("pTitle").value.trim(), genre: byId("pGenre").value.trim(), description: byId("pDescription").value.trim(), stage: "Planning", archived: false, episodes: [], characters: [], gates: []}); state.activeId = id; persist(); byId("projectForm").reset(); goTo("episodes", true); });
-  byId("addEpisode").addEventListener("click", function () { var project = activeProject(); if (!project) { return; } var id = "EP" + String(project.episodes.length + 1).padStart(2, "0"); project.episodes.push({id: id, title: "Untitled episode", hook: "", status: "Script draft", duration: 60, script: "", assetLink: "", archived: false}); persist(); render(); openEpisode(project.episodes.length - 1); });
-  byId("editForm").addEventListener("submit", function () { var episode = activeProject().episodes[editIndex]; if (!episode) { return; } episode.title = byId("eTitle").value.trim(); episode.hook = byId("hook").value.trim(); episode.status = byId("status").value; episode.duration = Number(byId("duration").value) || 60; episode.script = byId("script").value; episode.assetLink = byId("assetLink").value.trim(); persist(); render(); });
+  byId("newProject").addEventListener("click", function () { openProject(-1); });
+  byId("projectForm").addEventListener("submit", async function (event) {
+    event.preventDefault();
+    var existing = projectIndex >= 0 ? state.projects[projectIndex] : null;
+    var project = existing || {id: "p-" + crypto.randomUUID(), archived: false, episodes: [], characters: [], gates: [], prompts: []};
+    project.title = byId("pTitle").value.trim();
+    project.genre = byId("pGenre").value.trim();
+    project.description = byId("pDescription").value.trim();
+    project.stage = byId("pStage").value.trim() || "Planning";
+    project.bible = {logline: byId("pLogline").value.trim(), premise: byId("pPremise").value.trim(), seasonArc: byId("pSeasonArc").value.trim(), worldRules: byId("pWorldRules").value.trim(), toneStyle: byId("pToneStyle").value.trim(), audience: byId("pAudience").value.trim(), language: byId("pLanguage").value.trim(), aspectRatio: byId("pAspectRatio").value.trim(), productionConstraints: byId("pConstraints").value.trim()};
+    if (!existing) { state.projects.push(project); state.activeId = project.id; }
+    await persist();
+    render();
+    byId("projectDialog").close();
+    goTo(projectIndex >= 0 ? "projects" : "episodes", true);
+  });
+  byId("addEpisode").addEventListener("click", function () { var project = activeProject(); if (!project) { return; } var id = "EP" + String(project.episodes.length + 1).padStart(2, "0"); project.episodes.push({id: id, title: "Untitled episode", hook: "", synopsis: "", beats: "", shots: [], status: "Script draft", duration: 60, script: "", assetLink: "", archived: false}); persist(); render(); openEpisode(project.episodes.length - 1); });
+  byId("editForm").addEventListener("submit", function () {
+    var episode = activeProject().episodes[editIndex];
+    if (!episode) { return; }
+    collectShots();
+    episode.title = byId("eTitle").value.trim();
+    episode.hook = byId("hook").value.trim();
+    episode.synopsis = byId("episodeSynopsis").value.trim();
+    episode.beats = byId("episodeBeats").value.trim();
+    episode.shots = structuredClone(editingShots);
+    episode.status = byId("status").value;
+    episode.duration = Number(byId("duration").value) || 60;
+    episode.script = byId("script").value;
+    episode.assetLink = byId("assetLink").value.trim();
+    persist();
+    render();
+  });
   byId("archiveEpisode").addEventListener("click", function () { var episode = activeProject().episodes[editIndex]; episode.archived = !episode.archived; persist(); render(); byId("editor").close(); });
   byId("deleteEpisode").addEventListener("click", function () { if (window.confirm("Permanently delete this episode?")) { activeProject().episodes.splice(editIndex, 1); persist(); render(); byId("editor").close(); } });
+  byId("addShot").addEventListener("click", function () {
+    collectShots();
+    editingShots.push({id: "shot-" + crypto.randomUUID(), timeRange: "", visualBeat: "", cameraAction: "", dialogue: "", audioNotes: "", promptId: "", imagePrompt: "", videoPrompt: "", referenceAssets: "", modelSettings: "", outputLink: "", status: "Planned"});
+    renderShots();
+  });
+  byId("shotList").addEventListener("click", function (event) {
+    var button = event.target.closest("[data-shot-action]");
+    if (!button) { return; }
+    collectShots();
+    var index = Number(button.closest("[data-shot-index]").dataset.shotIndex);
+    if (button.dataset.shotAction === "remove") { editingShots.splice(index, 1); }
+    if (button.dataset.shotAction === "up" && index > 0) { editingShots.splice(index - 1, 0, editingShots.splice(index, 1)[0]); }
+    if (button.dataset.shotAction === "down" && index < editingShots.length - 1) { editingShots.splice(index + 1, 0, editingShots.splice(index, 1)[0]); }
+    renderShots();
+  });
 
   byId("addCharacter").addEventListener("click", function () { if (activeProject()) { openCharacter(-1); } });
   byId("characterForm").addEventListener("submit", async function (event) {
     event.preventDefault();
     var existing = characterIndex >= 0 ? activeProject().characters[characterIndex] : null;
-    var character = {id: existing ? existing.id : "c-" + crypto.randomUUID(), name: byId("cName").value.trim(), role: byId("cRole").value.trim(), age: byId("cAge").value.trim(), look: byId("cLook").value.trim(), state: byId("cState").value, link: byId("cLink").value.trim(), archived: existing ? existing.archived : false, hasImage: existing ? existing.hasImage : false};
+    var character = {id: existing ? existing.id : "c-" + crypto.randomUUID(), name: byId("cName").value.trim(), role: byId("cRole").value.trim(), age: byId("cAge").value.trim(), look: byId("cLook").value.trim(), referenceRequirements: byId("cReferenceRequirements").value.trim(), continuity: {mustKeep: byId("cMustKeep").value.trim(), mustAvoid: byId("cMustAvoid").value.trim(), wardrobeVariants: byId("cWardrobe").value.trim(), voice: byId("cVoice").value.trim()}, state: byId("cState").value, link: byId("cLink").value.trim(), archived: existing ? existing.archived : false, hasImage: existing ? existing.hasImage : false};
     if (characterIndex < 0) { activeProject().characters.push(character); characterIndex = activeProject().characters.length - 1; }
     else { activeProject().characters[characterIndex] = character; }
     await persist();
@@ -497,6 +647,63 @@
   byId("archiveCharacter").addEventListener("click", function () { var character = activeProject().characters[characterIndex]; character.archived = !character.archived; persist(); render(); byId("characterDialog").close(); });
   byId("deleteCharacter").addEventListener("click", function () { if (window.confirm("Permanently delete this character and its uploaded reference image?")) { activeProject().characters.splice(characterIndex, 1); persist(); render(); byId("characterDialog").close(); } });
   byId("removeCharacterImage").addEventListener("click", async function () { var character = activeProject().characters[characterIndex]; if (!window.confirm("Remove this private reference image?")) { return; } await api("/api/characters/" + encodeURIComponent(character.id) + "/image", {method: "DELETE"}); character.hasImage = false; byId("characterImageActions").classList.add("hidden"); render(); });
+
+  byId("addPrompt").addEventListener("click", function () { if (activeProject()) { openPrompt(-1); } });
+  byId("promptForm").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var existing = promptIndex >= 0 ? activeProject().prompts[promptIndex] : null;
+    var prompt = {id: existing ? existing.id : "prompt-" + crypto.randomUUID(), name: byId("promptName").value.trim(), category: byId("promptCategory").value, purpose: byId("promptPurpose").value.trim(), body: byId("promptBody").value, modelSettings: byId("promptSettings").value.trim(), updatedAt: new Date().toISOString()};
+    if (promptIndex < 0) { activeProject().prompts.push(prompt); }
+    else { activeProject().prompts[promptIndex] = prompt; }
+    persist();
+    render();
+    byId("promptDialog").close();
+  });
+  byId("deletePrompt").addEventListener("click", function () {
+    if (promptIndex >= 0 && window.confirm("Delete this reusable prompt? Existing shot prompt snapshots will remain unchanged.")) {
+      activeProject().prompts.splice(promptIndex, 1);
+      persist();
+      render();
+      byId("promptDialog").close();
+    }
+  });
+  byId("promptGrid").addEventListener("click", async function (event) {
+    var button = event.target.closest("[data-prompt-action]");
+    if (!button) { return; }
+    var prompt = activeProject().prompts[Number(button.dataset.index)];
+    if (button.dataset.promptAction === "edit") { openPrompt(Number(button.dataset.index)); return; }
+    try {
+      await navigator.clipboard.writeText(prompt.body);
+      button.textContent = "Copied";
+      window.setTimeout(function () { button.textContent = "Copy"; }, 1200);
+    } catch (error) { window.alert("Copy was blocked by this browser. Open Edit prompt to select the text."); }
+  });
+
+  byId("addGate").addEventListener("click", function () {
+    if (!activeProject()) { return; }
+    var name = window.prompt("Name this manual production gate:");
+    if (!name || !name.trim()) { return; }
+    activeProject().gates.push({name: name.trim().slice(0, 160), done: false});
+    persist();
+    render();
+  });
+  byId("gateList").addEventListener("change", function (event) {
+    if (event.target.matches("[data-gate-done]")) { activeProject().gates[Number(event.target.dataset.gateDone)].done = event.target.checked; }
+    if (event.target.matches("[data-gate-name]")) {
+      var value = event.target.value.trim();
+      if (!value) { render(); return; }
+      activeProject().gates[Number(event.target.dataset.gateName)].name = value;
+    }
+    persist();
+    render();
+  });
+  byId("gateList").addEventListener("click", function (event) {
+    var button = event.target.closest("[data-gate-remove]");
+    if (!button || !window.confirm("Remove this project gate?")) { return; }
+    activeProject().gates.splice(Number(button.dataset.gateRemove), 1);
+    persist();
+    render();
+  });
 
   byId("export").addEventListener("click", function () { window.alert("This JSON export contains text records only. Uploaded images are not included. Back up the persistent data volume for a complete image-inclusive backup."); var clean = structuredClone(state); clean.projects.forEach(function (project) { project.characters.forEach(function (character) { delete character.hasImage; }); }); var anchor = document.createElement("a"); var url = URL.createObjectURL(new Blob([JSON.stringify(clean, null, 2)], {type: "application/json"})); anchor.href = url; anchor.download = "ai-content-studio-text-backup.json"; anchor.click(); window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000); });
   byId("import").addEventListener("click", function () { byId("file").click(); });

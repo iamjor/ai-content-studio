@@ -94,6 +94,7 @@
           <button type="button" data-tab="projects" aria-label="Projects" title="Projects"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l2-2h9v13h-17zM3.5 10.5h17"/></svg><span class="nav-label">Projects</span></button>
           <button type="button" data-tab="episodes" aria-label="Episodes" title="Episodes"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m10 8 6 4-6 4z"/></svg><span class="nav-label">Episodes</span></button>
           <button type="button" data-tab="characters" aria-label="Characters" title="Characters"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.7-4.1 3-6.2 7-6.2s6.3 2.1 7 6.2"/></svg><span class="nav-label">Characters</span></button>
+          <button type="button" data-tab="prompts" aria-label="Prompts" title="Prompts"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg><span class="nav-label">Prompts</span></button>
           <button type="button" data-tab="workflow" aria-label="Workflow" title="Workflow"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.5 6H14a4 4 0 0 1 4 4v5.5M15.5 18H10a4 4 0 0 1-4-4V8.5"/></svg><span class="nav-label">Workflow</span></button>
           <button type="button" data-tab="tools" aria-label="Tools" title="Tools"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14.5 5.2a4 4 0 0 0-5.2 5.2L4 15.7 8.3 20l5.3-5.3a4 4 0 0 0 5.2-5.2l-2.7 2.7-3.3-3.3z"/></svg><span class="nav-label">Tools</span></button>
           <button type="button" data-tab="account" aria-label="Account" title="Account"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="3"/><path d="M6 20v-2.5a4.5 4.5 0 0 1 4.5-4.5h3a4.5 4.5 0 0 1 4.5 4.5V20"/></svg><span class="nav-label">Account</span></button>
@@ -187,8 +188,27 @@
           <div class="grid" id="characterGrid"></div>
         </section>
 
+        <section class="section" id="prompts" aria-labelledby="promptsTitle">
+          <div class="projectbar">
+            <div><span class="eyebrow">Selected project</span><h2 id="promptProjectTitle">Selected project</h2><p class="muted">Reusable prompts remain separate from the shared Tools catalog.</p></div>
+            <button class="btn" data-go="projects" type="button">Change project</button>
+          </div>
+          <div class="rowhead">
+            <div><h2 id="promptsTitle">Prompt library</h2><p>Save reusable production instructions and copy them when needed.</p></div>
+            <button class="btn primary" id="addPrompt" type="button">+ Prompt</button>
+          </div>
+          <div class="grid" id="promptGrid"></div>
+        </section>
+
         <section class="section" id="workflow" aria-labelledby="workflowTitle">
-          <div class="rowhead"><div><h2 id="workflowTitle">Reusable production system</h2><p>One pipeline across all projects, with manual approval before publishing.</p></div></div>
+          <div class="projectbar">
+            <div><span class="eyebrow">Selected project progress</span><h2 id="workflowProjectTitle">Selected project</h2><p class="muted" id="workflowShotSummary"></p></div>
+            <button class="btn" data-go="projects" type="button">Change project</button>
+          </div>
+          <div class="rowhead"><div><h2 id="workflowTitle">Project production gates</h2><p>Check only gates that have received an explicit human decision.</p></div><button class="btn" id="addGate" type="button">+ Gate</button></div>
+          <div class="stack" id="gateList"></div>
+          <div class="card-actions workflow-links"><button class="btn" data-open-bible type="button">Project Bible</button><button class="btn" data-go="episodes" type="button">Episodes and shots</button><button class="btn" data-go="characters" type="button">Characters</button><button class="btn" data-go="prompts" type="button">Prompts</button></div>
+          <div class="rowhead"><div><h2>Reusable production system</h2><p>One global pipeline across all projects, with manual approval before publishing.</p></div></div>
           <div class="workflow">
             <div class="step"><b>01 · SCRIPT</b><p>Write and time each episode to its target length.</p></div>
             <div class="step"><b>02 · REFERENCE</b><p>Approve cast and world designs; lock model, seed, and prompts.</p></div>
@@ -288,12 +308,25 @@
 
   <dialog class="modal" id="projectDialog">
     <form method="dialog" id="projectForm">
-      <div class="eyebrow">New creative world</div>
-      <h2>Create project</h2>
+      <div class="eyebrow">Project details and Bible</div>
+      <h2 id="projectModalTitle">Create project</h2>
       <label class="field">Title<input id="pTitle" type="text" required maxlength="100" placeholder="e.g. The Blue Cup"></label>
       <label class="field">Format or genre<input id="pGenre" type="text" maxlength="100" placeholder="AI microdrama, comedy, explainer..."></label>
-      <label class="field">Description<textarea id="pDescription" class="textarea-short" maxlength="500" placeholder="What is this project about?"></textarea></label>
-      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="create">Create project</button></div>
+      <label class="field">Description<textarea id="pDescription" class="textarea-medium" maxlength="2000" placeholder="What is this project about?"></textarea></label>
+      <label class="field">Stage<input id="pStage" type="text" maxlength="80" placeholder="Planning"></label>
+      <h3>Project Bible</h3>
+      <label class="field">Logline<textarea id="pLogline" class="textarea-short" maxlength="1000"></textarea></label>
+      <label class="field">Premise / synopsis<textarea id="pPremise" class="textarea-medium" maxlength="10000"></textarea></label>
+      <label class="field">Season arc<textarea id="pSeasonArc" class="textarea-medium" maxlength="10000"></textarea></label>
+      <label class="field">World rules<textarea id="pWorldRules" class="textarea-medium" maxlength="10000"></textarea></label>
+      <label class="field">Tone / visual style<textarea id="pToneStyle" class="textarea-medium" maxlength="10000"></textarea></label>
+      <div class="settings-grid">
+        <label class="field">Audience<input id="pAudience" type="text" maxlength="200"></label>
+        <label class="field">Language<input id="pLanguage" type="text" maxlength="100"></label>
+        <label class="field">Aspect ratio<input id="pAspectRatio" type="text" maxlength="40" placeholder="9:16"></label>
+      </div>
+      <label class="field">Production constraints<textarea id="pConstraints" class="textarea-medium" maxlength="10000"></textarea></label>
+      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" id="saveProject" type="submit" value="save">Save project</button></div>
     </form>
   </dialog>
 
@@ -303,10 +336,14 @@
       <h2 id="modalTitle">Episode</h2>
       <label class="field">Episode title<input id="eTitle" type="text" required maxlength="120"></label>
       <label class="field">Hook<input id="hook" type="text" maxlength="180"></label>
+      <label class="field">Episode synopsis<textarea id="episodeSynopsis" class="textarea-medium" maxlength="10000" placeholder="What happens in this episode?"></textarea></label>
+      <label class="field">Beat outline<textarea id="episodeBeats" class="textarea-medium" maxlength="10000" placeholder="One beat per line works well for a short episode."></textarea></label>
       <label class="field">Production status<select id="status"><option>Script draft</option><option>60s script ready</option><option>References approved</option><option>Assets generated</option><option>Editing</option><option>Ready for review</option><option>Approved</option><option>Published</option></select></label>
       <label class="field">Target duration (seconds)<input id="duration" type="number" min="15" max="180"></label>
       <label class="field">Full script / timing notes<textarea id="script"></textarea></label>
       <label class="field">Asset folder or review link<input id="assetLink" type="text" placeholder="Paste a link or folder name"></label>
+      <div class="rowhead compact-row"><div><h3>Shot plan</h3><p>Shots keep final prompt snapshots even if a linked library prompt changes.</p></div><button class="btn" id="addShot" type="button">+ Shot</button></div>
+      <div class="shot-list" id="shotList"></div>
       <div class="modalactions"><button class="btn danger" id="deleteEpisode" type="button">Delete episode</button><button class="btn" id="archiveEpisode" type="button">Archive</button><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="save">Save episode</button></div>
     </form>
   </dialog>
@@ -319,10 +356,29 @@
       <label class="field">Role<input id="cRole" type="text" maxlength="100"></label>
       <label class="field">Age or descriptor<input id="cAge" type="text" maxlength="70"></label>
       <label class="field">Fixed appearance / continuity notes<textarea id="cLook" class="textarea-medium"></textarea></label>
+      <label class="field">Reference requirements / image plan<textarea id="cReferenceRequirements" class="textarea-medium" maxlength="10000" placeholder="Needed views, details, props, lighting, and approval criteria."></textarea></label>
+      <h3>Continuity lock</h3>
+      <label class="field">Must keep<textarea id="cMustKeep" class="textarea-short" maxlength="5000"></textarea></label>
+      <label class="field">Must avoid<textarea id="cMustAvoid" class="textarea-short" maxlength="5000"></textarea></label>
+      <label class="field">Wardrobe variants<textarea id="cWardrobe" class="textarea-short" maxlength="5000"></textarea></label>
+      <label class="field">Voice<textarea id="cVoice" class="textarea-short" maxlength="5000"></textarea></label>
       <label class="field">Visual sheet status<select id="cState"><option>Written canon only</option><option>Generating reference</option><option>Reference approved</option></select></label>
       <label class="field">Reference link<input id="cLink" type="text" placeholder="Optional asset or folder link"></label>
-      <label class="field">Private reference image<input id="cImage" type="file" accept="image/png,image/jpeg,image/webp"><span class="field-help">PNG, JPEG, or WebP up to 5 MB. Stored in this account only.</span></label><div id="characterImageActions" class="action-row hidden"><button class="btn danger" id="removeCharacterImage" type="button">Remove image</button></div>
+      <label class="field">Approved private reference image<input id="cImage" type="file" accept="image/png,image/jpeg,image/webp"><span class="field-help">This release supports one approved PNG, JPEG, or WebP per character, up to 5 MB. It is stored in this account only and is not included in JSON export.</span></label><div id="characterImageActions" class="action-row hidden"><a class="btn" id="viewCharacterImage" target="_blank" rel="noopener">View approved image</a><button class="btn danger" id="removeCharacterImage" type="button">Remove image</button></div>
       <div class="modalactions"><button class="btn danger hidden" id="deleteCharacter" type="button">Delete character</button><button class="btn" id="archiveCharacter" type="button">Archive</button><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit" value="save">Save character</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="promptDialog">
+    <form method="dialog" id="promptForm">
+      <div class="eyebrow">Project prompt library</div>
+      <h2 id="promptModalTitle">Add prompt</h2>
+      <label class="field">Name<input id="promptName" type="text" required maxlength="120"></label>
+      <label class="field">Purpose / category<select id="promptCategory"><option>Style</option><option>Character</option><option>Prop</option><option>Location</option><option>Text-to-image</option><option>Image-to-video</option><option>Negative / avoid</option><option>Other</option></select></label>
+      <label class="field">Purpose notes<input id="promptPurpose" type="text" maxlength="300"></label>
+      <label class="field">Prompt body<textarea id="promptBody" required maxlength="20000"></textarea></label>
+      <label class="field">Optional model / settings<textarea id="promptSettings" class="textarea-short" maxlength="5000"></textarea></label>
+      <div class="modalactions"><button class="btn danger hidden" id="deletePrompt" type="button">Delete prompt</button><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Save prompt</button></div>
     </form>
   </dialog>
 

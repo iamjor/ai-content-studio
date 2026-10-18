@@ -4,7 +4,7 @@ This document is the canonical technical reference for AI Content Studio. It fol
 
 ## 1. Overview and scope
 
-AI Content Studio is a self-hosted planning dashboard for projects, episodes, characters, production workflow notes, reference images, and a shared tools catalog. It provides local account management and private per-user workspaces. It does not generate media, publish content, send email, or provide external identity services.
+AI Content Studio is a self-hosted planning dashboard for project Bibles, episodes, shot plans, characters, reusable prompts, production gates, private reference images, and a shared tools catalog. It provides local account management and private per-user workspaces. It does not generate media, publish content, send email, or provide external identity services.
 
 ## 2. Goals and non-goals
 
@@ -16,7 +16,7 @@ The application favors a small deployable surface, private workspace isolation, 
 
 ## 4. Data lifecycle
 
-An administrator is bootstrapped only when no administrator exists. Each user owns one revisioned workspace JSON document. Project, episode, and character archive states live in that document; permanent workspace deletions are saved through the same revision-aware update. Character image metadata lives in SQLite and bytes live under the image root. User deletion cascades through database-owned records and removes that user's uploaded files. JSON export moves text only. Complete backup and restore must include the database and image directory together.
+An administrator is bootstrapped only when no administrator exists. Each user owns one revisioned workspace JSON document. Project Bibles, prompt libraries, production gates, episode synopses, beat outlines, shots, character continuity, and archive states live in that document. Permanent workspace deletions are saved through the same revision-aware update. Character image metadata lives in SQLite and bytes live under the image root. Version 0.2 retains one approved private image per character. User deletion cascades through database-owned records and removes that user's uploaded files. JSON export moves text only. Complete backup and restore must include the database and image directory together.
 
 ## 5. System architecture
 
@@ -51,9 +51,9 @@ There is no package manager lockfile because the application has no third-party 
 
 ## 9. Data model
 
-Schema version 3 uses `users`, `workspaces`, `sessions`, `app_settings`, `login_attempts`, `tools`, and `character_images`. Users have a role, active state, optional archive time, display name, password record, and theme. Workspaces are keyed by user ID and contain a revision plus JSON. Sessions contain token hashes, CSRF tokens, and fixed expiry times. Tools are shared catalog records. Image metadata is unique per user and character.
+Schema version 4 uses `users`, `workspaces`, `sessions`, `app_settings`, `login_attempts`, `tools`, and `character_images`. Users have a role, active state, optional archive time, display name, password record, and theme. Workspaces are keyed by user ID and contain a revision plus JSON. Sessions contain token hashes, CSRF tokens, and fixed expiry times. Tools are shared catalog records. Image metadata is unique per user and character.
 
-Workspace JSON retains existing project IDs and accepts legacy structures through migration and normalization. The legacy `workspace` table is left intact after its first non-destructive copy to the initial administrator.
+Workspace JSON retains existing project, episode, character, prompt, and shot IDs and accepts legacy structures through migration and normalization. Missing v0.2 fields receive empty defaults without replacing descriptions, hooks, scripts, revisions, or stored images. A shot may link to a reusable prompt by ID, but stores its own final image and video prompt text so later library edits do not rewrite production instructions. The legacy `workspace` table is left intact after its first non-destructive copy to the initial administrator.
 
 ## 10. Identity and access
 
@@ -101,7 +101,15 @@ For startup failures, verify required bootstrap values only when no admin exists
 
 Security reporting guidance is in [SECURITY.md](SECURITY.md). Installation-specific investigation may require authorized production access.
 
-## 20. Roadmap and appendices
+## 20. Later API and authentication proposal
+
+A later ChatGPT integration should use a versioned JSON API that can read or list projects, episodes, characters, project prompts, and shots. Controlled create and update operations should require the current workspace revision through an `If-Match` value or equivalent request field, returning a conflict when the revision changed. The first tool set should not expose delete operations.
+
+Authorization should be account-scoped on every server query and mutation. Issue revocable, expiring integration credentials with narrow read or write scopes, store only credential hashes, and return private records only for the owning account. A browser session cookie and CSRF token are interactive browser controls, not permanent API credentials. No private workspace route should allow anonymous access. Audit metadata, rate limits, credential rotation, and explicit user consent should be designed before implementation.
+
+This proposal is documentation only. Version 0.2 does not add an MCP server, API credential, external connection, AI generation, or paid service.
+
+## 21. Roadmap and appendices
 
 Deferred possibilities include stronger account recovery and identity controls, formal API versioning, automated browser coverage, and documented recovery objectives. None is committed to a date. The owner selected the MIT License for version 0.1.0.
 

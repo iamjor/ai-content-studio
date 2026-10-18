@@ -11,11 +11,14 @@
   <img alt="Python 3.13" src="https://img.shields.io/badge/Python-3.13-3776AB.svg">
 </p>
 
-AI Content Studio organizes projects, episodes, characters, production workflow notes, reference images, and a shared tools catalog. Each account has a private workspace. Administrators control registration, account lifecycle, and the catalog.
+AI Content Studio organizes project Bibles, episodes, shot plans, characters, reusable prompts, production gates, private reference images, and a shared tools catalog. Each account has a private workspace. Administrators control registration, account lifecycle, and the catalog.
 
 ## Features
 
 - Private per-user projects, episodes, characters, workflow notes, and reference images
+- Editable project Bibles, episode synopses and beats, and reorderable shot plans
+- Project-scoped prompt libraries with stable shot prompt snapshots
+- Character reference requirements, continuity locks, and manual production gates
 - Archive, restore, and confirmed deletion flows
 - Administrator-managed users, registration policy, and shared tools
 - Password hashing, server-side sessions, CSRF checks, and bounded authentication attempts
@@ -64,6 +67,7 @@ The project does not provide email verification, password-reset email, MFA, exte
 
 - [Technical reference](docs/TECHNICAL.md)
 - [Deployment, migration, backup, and rollback](docs/DEPLOYMENT.md)
+- [Version 0.2.0 release notes](docs/RELEASE_NOTES_v0.2.0.md)
 - [Version 0.1.0 release notes](docs/RELEASE_NOTES_v0.1.0.md)
 - [Contributing](docs/CONTRIBUTING.md)
 - [Security policy](docs/SECURITY.md)

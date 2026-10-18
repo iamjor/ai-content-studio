@@ -37,7 +37,7 @@ Run these checks on the target host before changing the installation.
 - [ ] Record a private rollback image or commit.
 - [ ] Set the initial admin values in private `.env`.
 
-The first start creates schema version 3 and copies the shared workspace to the initial admin, adds non-destructive archive fields, seeds the SQLite tool catalog, and creates private image metadata. It leaves the legacy table unchanged and cannot overwrite a newer per-user workspace or revision.
+The first v0.2 start records schema version 4 and normalizes each workspace with empty project Bible, prompt, episode planning, shot, and character continuity fields. It preserves existing IDs, descriptions, hooks, scripts, revisions, archive state, sessions, users, and image records. Older startup behavior still copies the shared workspace to the initial admin, seeds the tool catalog, and creates private image metadata. The legacy table remains unchanged, and migration cannot overwrite a newer per-user workspace or revision.
 
 ## 4. Production rollout
 
@@ -60,6 +60,7 @@ Carry out these steps only on an installation you administer.
 - [ ] Verify enabled registration attempt limits and the total account cap.
 - [ ] Verify HTTPS Origin matches the preserved public Host and the session cookie is Secure, HttpOnly, and SameSite Strict in the deployed browser.
 - [ ] Verify migrated owner data, stable IDs, revision, seeded tool catalog, and lifecycle flags.
+- [ ] Verify project Bible edits, episode synopsis and beats, shot order, prompts, character reference requirements, gates, JSON transfer, and the existing approved private image.
 - [ ] Test logout, expiry, CSRF, account changes, and reauthentication.
 - [ ] Confirm registration is off unless intentionally opened.
 - [ ] Confirm regular-user workspace and image isolation, denied admin access, user lifecycle controls, and last-admin protection.
