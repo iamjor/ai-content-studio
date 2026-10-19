@@ -25,6 +25,8 @@ Run these checks on the target host before changing the installation.
 - [ ] Identify the app's immediate proxy peer and set `AICS_TRUSTED_PROXY_NETWORKS` to the smallest verified peer CIDR needed to distinguish client addresses.
 - [ ] Confirm untrusted peers cannot influence `CF-Connecting-IP` at the app boundary.
 - [ ] Set finite `AICS_MAX_USERS` and `AICS_REGISTRATION_ATTEMPT_LIMIT` values appropriate for the installation.
+- [ ] Set `AICS_PUBLIC_BASE_URL` to the exact external HTTPS origin with no path.
+- [ ] Confirm the proxy forwards `/mcp` and OAuth discovery and endpoint paths without rewriting their origin.
 - [ ] Keep the app loopback-only or on a private container network.
 - [ ] Confirm disk space and an off-server backup destination.
 - [ ] Keep registration off and Secure cookies on.
@@ -38,6 +40,10 @@ Run these checks on the target host before changing the installation.
 - [ ] Set the initial admin values in private `.env`.
 
 The first v0.2 start records schema version 4 and normalizes each workspace with empty project Bible, prompt, episode planning, shot, and character continuity fields. It preserves existing IDs, descriptions, hooks, scripts, revisions, archive state, sessions, users, and image records. Older startup behavior still copies the shared workspace to the initial admin, seeds the tool catalog, and creates private image metadata. The legacy table remains unchanged, and migration cannot overwrite a newer per-user workspace or revision.
+
+The first v0.3 start records schema version 5 and additively creates OAuth client, consent flow, authorization code, grant, hashed token, and MCP request-limit tables. It also adds stable IDs only where older prompts, gates, or shots lack one. Existing users, sessions, workspace revisions, projects, descriptions, episodes, scripts, hooks, characters, prompts, images, planning fields, and legacy tables are not replaced. Back up SQLite and the image directory together before upgrade.
+
+The v0.3 image installs the hash-locked official MCP SDK dependency set from `requirements.txt`; `requirements.in` records the direct SDK pin and starts a loopback-only MCP worker behind the existing public service. No external database, paid API, or production OAuth client is required.
 
 ## 4. Production rollout
 
@@ -53,6 +59,9 @@ Carry out these steps only on an installation you administer.
 ## 5. Production verification
 
 - [ ] Check Compose status and `/healthz`.
+- [ ] Check `/mcp/ready` without expecting it to reveal account or workspace data.
+- [ ] Verify OAuth authorization-server and protected-resource discovery use the configured public HTTPS origin.
+- [ ] Connect a disposable compatible MCP client, approve only required scopes, verify one read and one revision-safe write, then revoke it from Account.
 - [ ] Confirm plain HTTP is not public and HTTPS is valid.
 - [ ] Verify the in-app login replaces the browser Basic Auth dialog.
 - [ ] Verify concurrent login bursts stop at the source limit without password work, session creation, or HTTP 500 responses beyond that limit.
@@ -67,6 +76,7 @@ Carry out these steps only on an installation you administer.
 - [ ] Test image upload, replacement, removal, persistence after container restart, and a complete volume backup and restore.
 - [ ] Audit mobile and desktop layouts in both themes.
 - [ ] Review logs without exposing private data.
+- [ ] Confirm no bearer token appears in URLs, logs, browser exports, or source-controlled configuration.
 
 ## 6. Rollback
 

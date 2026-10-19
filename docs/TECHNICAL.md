@@ -29,7 +29,7 @@ flowchart LR
   S --> I[Private image directory]
 ```
 
-The provided container runs one threaded Python process. Static files and JSON routes share the same origin. The reverse proxy is operator-managed and is not included in this repository.
+The provided container runs the browser HTTP service and a loopback-only official-SDK MCP worker under one launcher. Static files and JSON routes share the same origin. The reverse proxy is operator-managed and is not included in this repository.
 
 ## 6. Trust boundaries
 
@@ -42,16 +42,16 @@ Unauthenticated clients may load static assets, query session state, sign in, an
 ## 8. Technology stack
 
 - Python standard library HTTP server and `sqlite3`
+- Official MCP Python SDK pinned to 2.2.0 through a hash-locked dependency set
 - SQLite in WAL mode with foreign keys and a busy timeout
 - Dependency-free HTML, CSS, and JavaScript frontend
 - Python 3.13 Alpine container image
 - Docker Compose with a named persistent volume
 
-There is no package manager lockfile because the application has no third-party runtime library dependency. The base image remains an external supply-chain dependency that must be reviewed during release preparation.
 
 ## 9. Data model
 
-Schema version 4 uses `users`, `workspaces`, `sessions`, `app_settings`, `login_attempts`, `tools`, and `character_images`. Users have a role, active state, optional archive time, display name, password record, and theme. Workspaces are keyed by user ID and contain a revision plus JSON. Sessions contain token hashes, CSRF tokens, and fixed expiry times. Tools are shared catalog records. Image metadata is unique per user and character.
+Schema version 5 uses `users`, `workspaces`, `sessions`, `app_settings`, `login_attempts`, `tools`, `character_images`, `oauth_clients`, `oauth_flows`, `oauth_codes`, `oauth_grants`, `oauth_tokens`, and `mcp_rate_limits`. Users have a role, active state, optional archive time, display name, password record, and theme. Workspaces are keyed by user ID and contain a revision plus JSON. Sessions contain token hashes, CSRF tokens, and fixed expiry times. Tools are shared catalog records. Image metadata is unique per user and character.
 
 Workspace JSON retains existing project, episode, character, prompt, and shot IDs and accepts legacy structures through migration and normalization. Missing v0.2 fields receive empty defaults without replacing descriptions, hooks, scripts, revisions, or stored images. A shot may link to a reusable prompt by ID, but stores its own final image and video prompt text so later library edits do not rewrite production instructions. The legacy `workspace` table is left intact after its first non-destructive copy to the initial administrator.
 
@@ -65,7 +65,7 @@ Passwords are limited to 12 through 256 characters and stored using salted PBKDF
 
 ## 12. Configuration
 
-Documented variables are `AICS_ADMIN_USERNAME`, `AICS_ADMIN_DISPLAY_NAME`, `AICS_ADMIN_PASSWORD`, `AICS_REGISTRATION_ENABLED`, `AICS_MAX_USERS`, `AICS_REGISTRATION_ATTEMPT_LIMIT`, `AICS_COOKIE_SECURE`, `AICS_SESSION_HOURS`, `AICS_TRUSTED_PROXY_NETWORKS`, and `AICS_IMAGE_ROOT`. The container also sets `AICS_DB_PATH=/data/studio.sqlite3` and `PORT=8787`. Legacy `AICS_USERNAME` and `AICS_PASSWORD` remain bootstrap fallbacks for upgrade compatibility.
+Documented variables are `AICS_ADMIN_USERNAME`, `AICS_ADMIN_DISPLAY_NAME`, `AICS_ADMIN_PASSWORD`, `AICS_REGISTRATION_ENABLED`, `AICS_MAX_USERS`, `AICS_REGISTRATION_ATTEMPT_LIMIT`, `AICS_COOKIE_SECURE`, `AICS_SESSION_HOURS`, `AICS_TRUSTED_PROXY_NETWORKS`, `AICS_IMAGE_ROOT`, `AICS_PUBLIC_BASE_URL`, and `AICS_MCP_INTERNAL_PORT`. The container also sets `AICS_DB_PATH=/data/studio.sqlite3` and `PORT=8787`. Legacy `AICS_USERNAME` and `AICS_PASSWORD` remain bootstrap fallbacks for upgrade compatibility.
 
 Secrets belong in an untracked `.env` or an operator-managed secret mechanism. Bootstrap credentials should be removed after the initial administrator exists.
 
@@ -75,7 +75,7 @@ Development may run natively with a temporary SQLite path and insecure local coo
 
 ## 14. Delivery behavior
 
-The service returns static assets and API responses with `Cache-Control: no-store`, content-type sniffing protection, same-origin referrer and opener policy, a restrictive permissions policy, and a self-only content security policy. HSTS is returned when Secure cookies are enabled. `/healthz` is the container health endpoint. The application version comes from `APP_VERSION` and is delivered through `/api/session` for both authenticated and signed-out footers.
+The service returns static assets and API responses with `Cache-Control: no-store`, content-type sniffing protection, same-origin referrer and opener policy, a restrictive permissions policy, and a self-only content security policy. HSTS is returned when Secure cookies are enabled. `/healthz` is the container health endpoint and `/mcp/ready` reports only loopback MCP worker readiness. The application version comes from `APP_VERSION` and is delivered through `/api/session` for both authenticated and signed-out footers.
 
 ## 15. Stable links and assets
 
@@ -101,13 +101,21 @@ For startup failures, verify required bootstrap values only when no admin exists
 
 Security reporting guidance is in [SECURITY.md](SECURITY.md). Installation-specific investigation may require authorized production access.
 
-## 20. Later API and authentication proposal
+## 20. OAuth and MCP endpoint contract
 
-A later ChatGPT integration should use a versioned JSON API that can read or list projects, episodes, characters, project prompts, and shots. Controlled create and update operations should require the current workspace revision through an `If-Match` value or equivalent request field, returning a conflict when the revision changed. The first tool set should not expose delete operations.
+The public Streamable HTTP endpoint is `/mcp` on the exact origin configured by `AICS_PUBLIC_BASE_URL`. OAuth authorization-server metadata is at `/.well-known/oauth-authorization-server`; RFC 9728 protected-resource metadata is at `/.well-known/oauth-protected-resource/mcp`. Dynamic registration accepts public clients with exact HTTPS redirect URIs or HTTP loopback redirects. Authorization code is the only interactive grant, PKCE S256 is mandatory, and access tokens target the exact MCP resource.
 
-Authorization should be account-scoped on every server query and mutation. Issue revocable, expiring integration credentials with narrow read or write scopes, store only credential hashes, and return private records only for the owning account. A browser session cookie and CSRF token are interactive browser controls, not permanent API credentials. No private workspace route should allow anonymous access. Audit metadata, rate limits, credential rotation, and explicit user consent should be designed before implementation.
+Access tokens live for one hour. Refresh tokens live for 30 days, rotate on every use, and revoke their family on replay. The database stores only SHA-256 hashes of high-entropy token values. `aics.read` and `aics.write` are enforced for each tool. Every token resolves one active, non-archived AICS account; administrator role does not widen record access. Password change and Account revocation invalidate grants. Ordinary browser logout ends the browser session but intentionally leaves separately consented integrations visible and revocable in Account.
 
-This proposal is documentation only. Version 0.2 does not add an MCP server, API credential, external connection, AI generation, or paid service.
+The official MCP SDK worker listens only on configurable loopback port `AICS_MCP_INTERNAL_PORT`. The public server validates and rate-limits the bearer token, forwards an allowlist of protocol headers without cookies, and caps request and response bodies. Browser session, CSRF, Origin, Host, proxy, and cookie controls remain separate and unchanged.
+
+Read tools are `get_workspace_summary`, `list_projects`, `get_project`, `get_project_bible`, `list_episodes`, `get_episode`, `list_characters`, `get_character`, `list_prompts`, and `list_production_gates`. Planning writes are `update_project_bible`, `update_episode_planning`, `replace_episode_shots`, `update_character_planning`, `upsert_project_prompt`, and `update_production_gates`. `archive_content_record` and `restore_content_record` support projects, episodes, characters, and prompts. Separate destructive tools are `delete_project`, `delete_episode`, `delete_character`, `delete_project_prompt`, `delete_episode_shot`, and `delete_production_gate`.
+
+Every write requires `expected_revision`, rejects stale revisions, and returns the new revision plus an exact changed-record summary. Partial updates preserve omitted values. Shot replacement validates the complete list and affects only the selected episode. Prompt changes never rewrite prompt snapshots stored on existing shots. Gate updates never remove omitted gates. Every permanent deletion requires an exact title or name confirmation plus the expected revision; unnamed shots use their exact stable ID. Project deletion reports and removes nested content and associated character images, character deletion removes only its own image, episode deletion removes only its shots, and prompt deletion preserves shot snapshots. Input schemas and service validation reject unknown nested fields, cross-project prompt IDs, malformed IDs, excessive text, and oversized arrays.
+
+MCP character reads expose only whether an approved private image exists. Image bytes, direct upload, and image-only deletion remain browser-only. Confirmed character and project deletion cleans up associated private images without exposing paths. The MCP surface exposes no account deletion, administrator, registration, deployment, publishing, shell, arbitrary database or file, AI generation, or paid API operations. It never returns password hashes, browser sessions, OAuth secrets, private storage paths, or unrelated workspace data.
+
+To connect a compatible client, configure `AICS_PUBLIC_BASE_URL`, deploy behind HTTPS, and enter `https://your-origin.example/mcp` in the client. The client follows discovery, registers its exact callback, opens AICS sign-in and consent, and stores the returned credentials. Never paste a token into a URL, source file, log, or plugin package. This repository contains no owner-specific plugin package or OAuth client.
 
 ## 21. Roadmap and appendices
 

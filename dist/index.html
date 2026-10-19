@@ -258,6 +258,18 @@
               <button class="btn primary" type="submit">Change password</button>
             </form>
           </div>
+          <section class="panel integrations-panel" aria-labelledby="integrationsTitle">
+            <div class="rowhead">
+              <div>
+                <h3 id="integrationsTitle">Connected integrations</h3>
+                <p>OAuth clients can access only the scopes you approve. Stored token values are never shown.</p>
+              </div>
+              <button class="btn" id="copyMcpEndpoint" type="button">Copy MCP endpoint</button>
+            </div>
+            <p class="field-help">Revoking an integration invalidates its access and refresh tokens. Browser logout does not revoke integrations.</p>
+            <p class="form-status" id="integrationStatus" role="status" aria-live="polite"></p>
+            <div class="stack" id="integrationList"></div>
+          </section>
         </section>
 
         <section class="section" id="admin" aria-labelledby="adminTitle">
