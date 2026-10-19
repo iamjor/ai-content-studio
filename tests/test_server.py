@@ -1268,6 +1268,93 @@ class ServerIntegrationTests(unittest.TestCase):
             server.setup()
         self.assertEqual(admin.request("/api/tools")[1]["tools"], [])
 
+    def test_17a_oauth_authorization_ui_locales_compatibility(self):
+        """Accept ChatGPT locale hints without weakening OAuth request validation."""
+        client = TestClient(self.base_url)
+        redirect_uri = self.base_url + "/locale-test-callback"
+        status, registered, _ = client.request(
+            "/oauth/register",
+            method="POST",
+            payload={
+                "client_name": "Locale compatibility test",
+                "redirect_uris": [redirect_uri],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        self.assertEqual(status, 201, registered)
+        admin = self.admin_client()
+        valid = {
+            "response_type": "code",
+            "client_id": registered["client_id"],
+            "redirect_uri": redirect_uri,
+            "scope": "aics.read aics.write",
+            "state": "locale-state",
+            "code_challenge": server.pkce_challenge("l" * 48),
+            "code_challenge_method": "S256",
+            "resource": self.base_url + "/mcp",
+        }
+
+        def authorize(changes=None):
+            """Send one authorization request built from the valid baseline."""
+            parameters = dict(valid)
+            parameters.update(changes or {})
+            return admin.request(
+                "/oauth/authorize?" + urllib.parse.urlencode(parameters)
+            )
+
+        status, page, _ = authorize()
+        self.assertEqual(status, 200, page)
+        status, page, _ = authorize({"ui_locales": "en-US"})
+        self.assertEqual(status, 200, page)
+        status, page, _ = authorize({"ui_locales": "en-US fr-FR"})
+        self.assertEqual(status, 200, page)
+
+        with sqlite3.connect(self.database_path) as database:
+            saved_requests = [
+                json.loads(row[0])
+                for row in database.execute(
+                    "SELECT request_data FROM oauth_flows"
+                ).fetchall()
+            ]
+        self.assertTrue(saved_requests)
+        self.assertTrue(
+            all("ui_locales" not in request for request in saved_requests)
+        )
+
+        rejected = (
+            {"ui_locales": "en_US"},
+            {"ui_locales": "en-US  fr-FR"},
+            {"ui_locales": "a" * 129},
+            {"unknown_parameter": "value"},
+            {"redirect_uri": self.base_url + "/wrong-callback"},
+            {"resource": self.base_url + "/wrong-resource"},
+            {"code_challenge": "short"},
+            {"code_challenge_method": "plain"},
+            {"scope": "aics.admin"},
+            {"client_id": "unknown-client"},
+        )
+        for changes in rejected:
+            status, payload, _ = authorize(changes)
+            self.assertEqual(status, 400, (changes, payload))
+            self.assertEqual(payload["error"], "invalid_request")
+
+        handler = object.__new__(server.Handler)
+        with self.assertRaises(ValueError):
+            handler.validated_authorization_request(
+                dict(valid, ui_locales=["en-US"])
+            )
+
+        with sqlite3.connect(self.database_path) as database:
+            database.execute("DELETE FROM oauth_flows")
+            database.execute(
+                "DELETE FROM oauth_source_limits WHERE purpose='authorization'"
+            )
+            database.execute(
+                "DELETE FROM oauth_source_limits WHERE purpose='registration'"
+            )
+
     def test_18_oauth_discovery_pkce_rotation_revocation_and_redirects(self):
         """Exercise OAuth discovery, consent, PKCE, rotation, and revocation."""
         client = TestClient(self.base_url)
