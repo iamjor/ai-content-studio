@@ -5,6 +5,7 @@ import concurrent.futures
 import http.cookies
 import json
 import os
+import secrets
 import socket
 import sqlite3
 import subprocess
@@ -15,9 +16,11 @@ import time
 import unittest
 import unittest.mock
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import mcp_service
 import server
 
 
@@ -270,6 +273,29 @@ class LoginThrottleUnitTests(unittest.TestCase):
             self.assertEqual(handler.login_client_address(), "203.0.113.25")
 
 
+class McpReadinessUnitTests(unittest.TestCase):
+    """Verify container health can detect a stopped private MCP worker."""
+
+    def test_readiness_fails_when_mcp_worker_is_unreachable(self):
+        """Return 503 when the loopback MCP child process cannot be contacted."""
+        handler = object.__new__(server.Handler)
+        handler.json_reply = unittest.mock.Mock(return_value="unhealthy")
+        with unittest.mock.patch.object(
+            server.http.client,
+            "HTTPConnection",
+            side_effect=ConnectionRefusedError,
+        ):
+            result = handler.mcp_readiness()
+        self.assertEqual(result, "unhealthy")
+        handler.json_reply.assert_called_once_with(503, {"ready": False})
+
+    def test_compose_health_checks_web_and_mcp_readiness(self):
+        """Keep both public web and private worker readiness in Compose health."""
+        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+        self.assertIn("http://127.0.0.1:8787/healthz", compose)
+        self.assertIn("http://127.0.0.1:8787/mcp/ready", compose)
+
+
 class WorkspacePlanningMigrationTests(unittest.TestCase):
     """Verify v0.2 defaults preserve owner-entered legacy planning records."""
 
@@ -317,6 +343,72 @@ class WorkspacePlanningMigrationTests(unittest.TestCase):
         _, changed_again = server.normalize_workspace_data(migrated)
         self.assertFalse(changed_again)
 
+    def test_oauth_token_scope_column_migrates_without_losing_rows(self):
+        """Add per-token scopes to an existing schema while retaining token records."""
+        with tempfile.TemporaryDirectory(prefix="aics-scope-migration-") as directory:
+            database_path = Path(directory) / "migration.sqlite3"
+            raw_token = "migration-access-" + secrets.token_urlsafe(40)
+            with unittest.mock.patch.multiple(
+                server,
+                DB_PATH=database_path,
+                ADMIN_USERNAME=ADMIN_USERNAME,
+                ADMIN_PASSWORD=ADMIN_PASSWORD,
+                ADMIN_DISPLAY_NAME="Studio Owner",
+            ):
+                server.setup()
+                with sqlite3.connect(database_path) as database:
+                    user_id = database.execute(
+                        "SELECT id FROM users WHERE role='admin'"
+                    ).fetchone()[0]
+                    now = int(time.time())
+                    database.execute(
+                        """
+                        INSERT INTO oauth_clients
+                            (client_id, client_name, redirect_uris, created_at)
+                        VALUES ('migration-client', 'Migration test', '[]', ?)
+                        """,
+                        (now,),
+                    )
+                    grant_id = database.execute(
+                        """
+                        INSERT INTO oauth_grants
+                            (user_id, client_id, scopes, created_at)
+                        VALUES (?, 'migration-client',
+                                'aics.read aics.write', ?)
+                        """,
+                        (user_id, now),
+                    ).lastrowid
+                    database.execute(
+                        """
+                        INSERT INTO oauth_tokens
+                            (token_hash, grant_id, token_type, family_id,
+                             created_at, expires_at, scopes)
+                        VALUES (?, ?, 'access', 'migration-family', ?, ?,
+                                'aics.read aics.write')
+                        """,
+                        (
+                            server.token_hash(raw_token), grant_id,
+                            now, now + 3600,
+                        ),
+                    )
+                    database.execute("ALTER TABLE oauth_tokens DROP COLUMN scopes")
+                server.setup()
+                with sqlite3.connect(database_path) as database:
+                    columns = {
+                        row[1]
+                        for row in database.execute(
+                            "PRAGMA table_info(oauth_tokens)"
+                        )
+                    }
+                    token_count = database.execute(
+                        "SELECT COUNT(*) FROM oauth_tokens"
+                    ).fetchone()[0]
+                self.assertIn("scopes", columns)
+                self.assertEqual(token_count, 1)
+                self.assertIsNotNone(
+                    server.resolve_access_token(raw_token, "aics.write")
+                )
+
 
 class ServerIntegrationTests(unittest.TestCase):
     """Exercise public defaults and authenticated behavior against a real server."""
@@ -355,6 +447,9 @@ class ServerIntegrationTests(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             cls.port = sock.getsockname()[1]
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            cls.mcp_port = sock.getsockname()[1]
         cls.base_url = f"http://127.0.0.1:{cls.port}"
         env = os.environ.copy()
         env.update(
@@ -367,13 +462,17 @@ class ServerIntegrationTests(unittest.TestCase):
                 "AICS_REGISTRATION_ENABLED": "0",
                 "AICS_MAX_USERS": "8",
                 "AICS_REGISTRATION_ATTEMPT_LIMIT": "5",
+                "AICS_OAUTH_CLIENT_LIMIT": "12",
+                "AICS_OAUTH_FLOW_LIMIT": "4",
                 "AICS_TRUSTED_PROXY_NETWORKS": "127.0.0.1/32",
                 "AICS_SESSION_HOURS": "12",
+                "AICS_PUBLIC_BASE_URL": cls.base_url,
+                "AICS_MCP_INTERNAL_PORT": str(cls.mcp_port),
                 "PORT": str(cls.port),
             }
         )
         cls.process = subprocess.Popen(
-            [sys.executable, "server.py"],
+            [sys.executable, "launcher.py"],
             cwd=ROOT,
             env=env,
             stdout=subprocess.DEVNULL,
@@ -382,11 +481,13 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         for _ in range(80):
             try:
-                status, _, _ = TestClient(cls.base_url).request("/healthz")
-                if status == 200:
+                web_status, _, _ = TestClient(cls.base_url).request("/healthz")
+                mcp_status, _, _ = TestClient(cls.base_url).request("/mcp/ready")
+                if web_status == 200 and mcp_status == 200:
                     return
             except OSError:
-                time.sleep(0.1)
+                pass
+            time.sleep(0.1)
         cls.stop_server()
         raise RuntimeError("test server did not start")
 
@@ -436,6 +537,9 @@ class ServerIntegrationTests(unittest.TestCase):
         status, health, _ = client.request("/healthz")
         self.assertEqual(status, 200)
         self.assertEqual(health, {"ok": True})
+        status, ready, _ = client.request("/mcp/ready")
+        self.assertEqual(status, 200)
+        self.assertEqual(ready, {"ready": True})
 
         status, html, headers = client.request("/")
         self.assertEqual(status, 200)
@@ -447,7 +551,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(session["authenticated"])
         self.assertFalse(session["registrationEnabled"])
-        self.assertEqual(session["version"], "0.2.0")
+        self.assertEqual(session["version"], "0.3.0")
 
     def test_02_admin_login_hashing_and_legacy_migration(self):
         """Hash the bootstrap password and assign legacy data to the initial admin."""
@@ -455,7 +559,7 @@ class ServerIntegrationTests(unittest.TestCase):
         status, payload, headers = admin.login(ADMIN_USERNAME, ADMIN_PASSWORD)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["user"]["role"], "admin")
-        self.assertEqual(payload["version"], "0.2.0")
+        self.assertEqual(payload["version"], "0.3.0")
         set_cookie = headers.get("Set-Cookie", "")
         self.assertIn("HttpOnly", set_cookie)
         self.assertIn("SameSite=Strict", set_cookie)
@@ -487,7 +591,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertTrue(stored.startswith("pbkdf2_sha256$"))
         self.assertNotIn(ADMIN_PASSWORD, stored)
         self.assertEqual(legacy_count, 1)
-        self.assertEqual(schema_version, "4")
+        self.assertEqual(schema_version, "5")
 
     def test_03_registration_policy_and_roles(self):
         """Keep signup admin-controlled and never accept a requested admin role."""
@@ -1163,6 +1267,822 @@ class ServerIntegrationTests(unittest.TestCase):
         with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
             server.setup()
         self.assertEqual(admin.request("/api/tools")[1]["tools"], [])
+
+    def test_18_oauth_discovery_pkce_rotation_revocation_and_redirects(self):
+        """Exercise OAuth discovery, consent, PKCE, rotation, and revocation."""
+        client = TestClient(self.base_url)
+        protected = client.request("/.well-known/oauth-protected-resource/mcp")
+        self.assertEqual(protected[0], 200)
+        self.assertEqual(protected[1]["resource"], self.base_url + "/mcp")
+        metadata = client.request("/.well-known/oauth-authorization-server")
+        self.assertEqual(metadata[0], 200)
+        self.assertEqual(metadata[1]["code_challenge_methods_supported"], ["S256"])
+
+        invalid = {
+            "client_name": "Bad redirect",
+            "redirect_uris": ["https://example.test/callback#fragment"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        }
+        self.assertEqual(
+            client.request("/oauth/register", method="POST", payload=invalid)[0],
+            400,
+        )
+        redirect_uri = self.base_url + "/oauth-test-callback"
+        registration = dict(invalid, client_name="MCP test", redirect_uris=[redirect_uri])
+        now = int(time.time())
+        registration_scope = server.hashlib.sha256(
+            b"oauth-registration\x00127.0.0.1"
+        ).hexdigest()
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO oauth_source_limits
+                    (scope_hash, purpose, window_started, request_count)
+                VALUES (?, 'registration', ?, ?)
+                """,
+                (registration_scope, now, server.OAUTH_REGISTRATION_LIMIT),
+            )
+            clients_before = database.execute(
+                "SELECT COUNT(*) FROM oauth_clients"
+            ).fetchone()[0]
+        status, _, headers = client.request(
+            "/oauth/register", method="POST", payload=registration
+        )
+        self.assertEqual(status, 429)
+        self.assertIsNotNone(headers.get("Retry-After"))
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_clients").fetchone()[0],
+                clients_before,
+            )
+            database.execute(
+                "DELETE FROM oauth_source_limits WHERE purpose='registration'"
+            )
+            database.execute(
+                """
+                INSERT INTO oauth_clients
+                    (client_id, client_name, redirect_uris, created_at)
+                VALUES ('expired-client', 'Expired', '[]', ?)
+                """,
+                (now - server.OAUTH_CLIENT_TTL_SECONDS - 1,),
+            )
+            database.execute(
+                """
+                INSERT INTO oauth_flows
+                    (flow_hash, request_data, created_at, expires_at)
+                VALUES ('expired-flow', '{}', ?, ?)
+                """,
+                (now - 10, now - 1),
+            )
+        status, registered, _ = client.request(
+            "/oauth/register", method="POST", payload=registration
+        )
+        self.assertEqual(status, 201, registered)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertIsNone(
+                database.execute(
+                    "SELECT 1 FROM oauth_clients WHERE client_id='expired-client'"
+                ).fetchone()
+            )
+            self.assertIsNone(
+                database.execute(
+                    "SELECT 1 FROM oauth_flows WHERE flow_hash='expired-flow'"
+                ).fetchone()
+            )
+
+        admin = self.admin_client()
+        verifier = "v" * 48
+        challenge = server.pkce_challenge(verifier)
+        query = urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": registered["client_id"],
+                "redirect_uri": redirect_uri,
+                "scope": "aics.read aics.write",
+                "state": "state-value",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "resource": self.base_url + "/mcp",
+            }
+        )
+        authorization_scope = server.hashlib.sha256(
+            b"oauth-authorization\x00127.0.0.1"
+        ).hexdigest()
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO oauth_source_limits
+                    (scope_hash, purpose, window_started, request_count)
+                VALUES (?, 'authorization', ?, ?)
+                """,
+                (authorization_scope, now, server.OAUTH_AUTHORIZATION_LIMIT),
+            )
+            flows_before = database.execute(
+                "SELECT COUNT(*) FROM oauth_flows"
+            ).fetchone()[0]
+        status, _, headers = admin.request("/oauth/authorize?" + query)
+        self.assertEqual(status, 429)
+        self.assertIsNotNone(headers.get("Retry-After"))
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_flows").fetchone()[0],
+                flows_before,
+            )
+            database.execute(
+                "DELETE FROM oauth_source_limits WHERE purpose='authorization'"
+            )
+        status, page, headers = admin.request("/oauth/authorize?" + query)
+        self.assertEqual(status, 200, page)
+        flow = page.split('name="flow" value="', 1)[1].split('"', 1)[0]
+        flow_cookie = headers.get("Set-Cookie", "").split(";", 1)[0]
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            """Keep the authorization response available for exact inspection."""
+
+            def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+                """Decline automatic callback navigation."""
+                return None
+
+        body = urllib.parse.urlencode(
+            {"flow": flow, "decision": "approve"}
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.base_url + "/oauth/authorize",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": admin.cookie + "; " + flow_cookie,
+            },
+        )
+        try:
+            urllib.request.build_opener(NoRedirect).open(request, timeout=5)
+            self.fail("Authorization redirect was expected.")
+        except urllib.error.HTTPError as response:
+            self.assertEqual(response.code, 302)
+            callback = urllib.parse.urlsplit(response.headers["Location"])
+        parameters = urllib.parse.parse_qs(callback.query)
+        self.assertEqual(parameters["state"], ["state-value"])
+        code = parameters["code"][0]
+
+        def form_post(path, values):
+            """Post an OAuth form and decode its JSON response."""
+            request = urllib.request.Request(
+                self.base_url + path,
+                data=urllib.parse.urlencode(values).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            try:
+                response = urllib.request.urlopen(request, timeout=5)
+            except urllib.error.HTTPError as error:
+                response = error
+            return response.status, json.loads(response.read() or b"{}")
+
+        status, tokens = form_post(
+            "/oauth/token",
+            {
+                "grant_type": "authorization_code",
+                "client_id": registered["client_id"],
+                "redirect_uri": redirect_uri,
+                "code": code,
+                "code_verifier": verifier,
+                "resource": self.base_url + "/mcp",
+            },
+        )
+        self.assertEqual(status, 200, tokens)
+        with sqlite3.connect(self.database_path) as database:
+            stored_hashes = {
+                row[0] for row in database.execute(
+                    "SELECT token_hash FROM oauth_tokens"
+                ).fetchall()
+            }
+        self.assertNotIn(tokens["access_token"], stored_hashes)
+        self.assertIn(server.token_hash(tokens["access_token"]), stored_hashes)
+        self.assertIn(server.token_hash(tokens["refresh_token"]), stored_hashes)
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            self.assertIsNotNone(
+                server.resolve_access_token(tokens["access_token"], "aics.read")
+            )
+            self.assertIsNone(
+                server.resolve_access_token(tokens["access_token"], "aics.admin")
+            )
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                "UPDATE oauth_tokens SET expires_at=? WHERE token_hash=?",
+                (int(time.time()) - 1, server.token_hash(tokens["access_token"])),
+            )
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            self.assertIsNone(server.resolve_access_token(tokens["access_token"]))
+        integrations = admin.request("/api/account/integrations")[1]["integrations"]
+        self.assertEqual(integrations[0]["clientName"], "MCP test")
+        self.assertEqual(
+            integrations[0]["scopes"], ["aics.read", "aics.write"]
+        )
+
+        status, rotated = form_post(
+            "/oauth/token",
+            {
+                "grant_type": "refresh_token",
+                "client_id": registered["client_id"],
+                "refresh_token": tokens["refresh_token"],
+                "scope": "aics.read",
+            },
+        )
+        self.assertEqual(status, 200, rotated)
+        self.assertEqual(rotated["scope"], "aics.read")
+        self.assertNotEqual(rotated["refresh_token"], tokens["refresh_token"])
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            self.assertIsNotNone(
+                server.resolve_access_token(rotated["access_token"], "aics.read")
+            )
+            self.assertIsNone(
+                server.resolve_access_token(rotated["access_token"], "aics.write")
+            )
+        self.assertEqual(
+            form_post(
+                "/oauth/token",
+                {
+                    "grant_type": "refresh_token",
+                    "client_id": registered["client_id"],
+                    "refresh_token": tokens["refresh_token"],
+                },
+            )[0],
+            400,
+        )
+        grant_id = integrations[0]["id"]
+        self.assertEqual(
+            admin.request(
+                "/api/account/integrations/" + str(grant_id), method="DELETE"
+            )[0],
+            200,
+        )
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            self.assertIsNone(
+                server.resolve_access_token(rotated["access_token"])
+            )
+        with sqlite3.connect(self.database_path) as database:
+            for index in range(4):
+                database.execute(
+                    """
+                    INSERT INTO oauth_flows
+                        (flow_hash, request_data, created_at, expires_at)
+                    VALUES (?, '{}', ?, ?)
+                    """,
+                    ("capacity-flow-" + str(index), now, now + 300),
+                )
+            flows_before = database.execute(
+                "SELECT COUNT(*) FROM oauth_flows"
+            ).fetchone()[0]
+        status, payload, _ = admin.request("/oauth/authorize?" + query)
+        self.assertEqual(status, 503, payload)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_flows").fetchone()[0],
+                flows_before,
+            )
+        with sqlite3.connect(self.database_path) as database:
+            client_count = database.execute(
+                "SELECT COUNT(*) FROM oauth_clients"
+            ).fetchone()[0]
+            for index in range(12 - client_count):
+                database.execute(
+                    """
+                    INSERT INTO oauth_clients
+                        (client_id, client_name, redirect_uris, created_at)
+                    VALUES (?, 'Capacity test', '[]', ?)
+                    """,
+                    ("capacity-client-" + str(index), int(time.time())),
+                )
+            clients_before = database.execute(
+                "SELECT COUNT(*) FROM oauth_clients"
+            ).fetchone()[0]
+        status, payload, _ = client.request(
+            "/oauth/register", method="POST", payload=registration
+        )
+        self.assertEqual(status, 503, payload)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_clients").fetchone()[0],
+                clients_before,
+            )
+
+    def test_19a_read_only_refresh_token_rejects_every_mcp_mutation(self):
+        """Keep a narrowed refresh token read-only through the actual MCP transport."""
+        admin = self.admin_client()
+        revision_before = admin.request("/api/workspace")[1]["revision"]
+        now = int(time.time())
+        client_id = "read-only-refresh-client"
+        raw_refresh = "test-refresh-" + secrets.token_urlsafe(40)
+        with sqlite3.connect(self.database_path) as database:
+            user_id = database.execute(
+                "SELECT id FROM users WHERE username=?", (ADMIN_USERNAME,)
+            ).fetchone()[0]
+            database.execute(
+                """
+                INSERT OR REPLACE INTO oauth_clients
+                    (client_id, client_name, redirect_uris, created_at)
+                VALUES (?, 'Read-only refresh test', '[]', ?)
+                """,
+                (client_id, now),
+            )
+            database.execute(
+                """
+                INSERT OR REPLACE INTO oauth_grants
+                    (id, user_id, client_id, scopes, created_at, revoked_at)
+                VALUES (9002, ?, ?, 'aics.read aics.write', ?, NULL)
+                """,
+                (user_id, client_id, now),
+            )
+            database.execute(
+                """
+                INSERT INTO oauth_tokens
+                    (token_hash, grant_id, token_type, family_id, created_at,
+                     expires_at, scopes)
+                VALUES (?, 9002, 'refresh', 'read-only-family', ?, ?,
+                        'aics.read aics.write')
+                """,
+                (server.token_hash(raw_refresh), now, now + 3600),
+            )
+
+        request = urllib.request.Request(
+            self.base_url + "/oauth/token",
+            data=urllib.parse.urlencode(
+                {
+                    "grant_type": "refresh_token",
+                    "client_id": client_id,
+                    "refresh_token": raw_refresh,
+                    "scope": "aics.read",
+                }
+            ).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            narrowed = json.loads(response.read())
+        self.assertEqual(narrowed["scope"], "aics.read")
+
+        def mcp_request(payload, session_id=None):
+            """Send an authenticated JSON-RPC request with the narrowed token."""
+            headers = {
+                "Authorization": "Bearer " + narrowed["access_token"],
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            if session_id:
+                headers["Mcp-Session-Id"] = session_id
+            rpc = urllib.request.Request(
+                self.base_url + "/mcp",
+                data=json.dumps(payload).encode("utf-8"),
+                method="POST",
+                headers=headers,
+            )
+            with urllib.request.urlopen(rpc, timeout=10) as response:
+                body = response.read()
+                return json.loads(body) if body else {}, response.headers.get(
+                    "Mcp-Session-Id"
+                )
+
+        initialized, session_id = mcp_request(
+            {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "Read-only test", "version": "1"},
+                },
+            }
+        )
+        self.assertIn("result", initialized)
+        mcp_request(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id,
+        )
+        read_result, _ = mcp_request(
+            {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {
+                    "name": "get_workspace_summary",
+                    "arguments": {},
+                },
+            },
+            session_id,
+        )
+        self.assertIn("result", read_result)
+
+        mutation_calls = {
+            "update_project_bible": {
+                "project_id": "blocked", "expected_revision": 0,
+                "changes": {"logline": "Blocked"},
+            },
+            "update_episode_planning": {
+                "project_id": "blocked", "episode_id": "blocked",
+                "expected_revision": 0, "synopsis": "Blocked",
+            },
+            "replace_episode_shots": {
+                "project_id": "blocked", "episode_id": "blocked",
+                "expected_revision": 0, "shots": [],
+            },
+            "update_character_planning": {
+                "project_id": "blocked", "character_id": "blocked",
+                "expected_revision": 0, "reference_requirements": "Blocked",
+            },
+            "upsert_project_prompt": {
+                "project_id": "blocked", "expected_revision": 0,
+                "name": "Blocked", "category": "style", "body": "Blocked",
+            },
+            "update_production_gates": {
+                "project_id": "blocked", "expected_revision": 0,
+                "gates": [{"id": "blocked", "name": "Blocked"}],
+            },
+            "archive_content_record": {
+                "project_id": "blocked", "record_type": "project",
+                "record_id": "blocked", "expected_revision": 0,
+            },
+            "restore_content_record": {
+                "project_id": "blocked", "record_type": "project",
+                "record_id": "blocked", "expected_revision": 0,
+            },
+            "delete_project": {
+                "project_id": "blocked", "expected_revision": 0,
+                "confirmation": "Blocked",
+            },
+            "delete_episode": {
+                "project_id": "blocked", "episode_id": "blocked",
+                "expected_revision": 0, "confirmation": "Blocked",
+            },
+            "delete_character": {
+                "project_id": "blocked", "character_id": "blocked",
+                "expected_revision": 0, "confirmation": "Blocked",
+            },
+            "delete_project_prompt": {
+                "project_id": "blocked", "prompt_id": "blocked",
+                "expected_revision": 0, "confirmation": "Blocked",
+            },
+            "delete_episode_shot": {
+                "project_id": "blocked", "episode_id": "blocked",
+                "shot_id": "blocked", "expected_revision": 0,
+                "confirmation": "Blocked",
+            },
+            "delete_production_gate": {
+                "project_id": "blocked", "gate_id": "blocked",
+                "expected_revision": 0, "confirmation": "Blocked",
+            },
+        }
+        for request_id, (name, arguments) in enumerate(
+            mutation_calls.items(), start=3
+        ):
+            denied, _ = mcp_request(
+                {
+                    "jsonrpc": "2.0", "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+                session_id,
+            )
+            self.assertIn("insufficient_scope", json.dumps(denied), name)
+        self.assertEqual(
+            admin.request("/api/workspace")[1]["revision"], revision_before
+        )
+
+    def test_19_mcp_actual_http_transport_and_bounded_tool_catalog(self):
+        """Initialize over Streamable HTTP and call representative read and write tools."""
+        self.assertEqual(
+            TestClient(self.base_url).request("/mcp", method="POST", payload={})[0],
+            401,
+        )
+        admin = self.admin_client()
+        current = admin.request("/api/workspace")[1]
+        transport_data = {
+            "projects": [{
+                "id": "transport-project", "title": "Transport project",
+                "bible": {"logline": "Before transport write"},
+                "episodes": [], "characters": [], "prompts": [], "gates": [],
+            }],
+            "activeId": "transport-project",
+        }
+        status, saved, _ = admin.request(
+            "/api/workspace", method="PUT",
+            payload={"revision": current["revision"], "data": transport_data},
+        )
+        self.assertEqual(status, 200, saved)
+        transport_revision = saved["revision"]
+        with sqlite3.connect(self.database_path) as database:
+            database.row_factory = sqlite3.Row
+            user_id = database.execute(
+                "SELECT id FROM users WHERE username=?", (ADMIN_USERNAME,)
+            ).fetchone()["id"]
+            client_id = "transport-test-client"
+            now = int(time.time())
+            database.execute(
+                "INSERT OR REPLACE INTO oauth_clients VALUES (?, ?, ?, ?)",
+                (client_id, "Transport test", json.dumps([self.base_url + "/callback"]), now),
+            )
+            database.execute(
+                """
+                INSERT OR REPLACE INTO oauth_grants
+                    (id, user_id, client_id, scopes, created_at, revoked_at)
+                VALUES (9001, ?, ?, 'aics.read aics.write', ?, NULL)
+                """,
+                (user_id, client_id, now),
+            )
+            raw_token = "test-access-" + secrets.token_urlsafe(40)
+            database.execute(
+                """
+                INSERT INTO oauth_tokens
+                    (token_hash, grant_id, token_type, family_id, created_at, expires_at)
+                VALUES (?, 9001, 'access', 'test-family', ?, ?)
+                """,
+                (server.token_hash(raw_token), now, now + 3600),
+            )
+
+        def mcp_request(payload, session_id=None):
+            """Send one JSON-RPC request through the public MCP transport."""
+            headers = {
+                "Authorization": "Bearer " + raw_token,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            if session_id:
+                headers["Mcp-Session-Id"] = session_id
+            request = urllib.request.Request(
+                self.base_url + "/mcp",
+                data=json.dumps(payload).encode("utf-8"),
+                method="POST",
+                headers=headers,
+            )
+            response = urllib.request.urlopen(request, timeout=10)
+            raw = response.read()
+            return (
+                json.loads(raw) if raw else {},
+                response.headers.get("Mcp-Session-Id"),
+            )
+
+        initialized, session_id = mcp_request(
+            {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": {"name": "AICS tests", "version": "1"},
+                },
+            }
+        )
+        self.assertIn("result", initialized)
+        mcp_request(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id,
+        )
+        listed, _ = mcp_request(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            session_id,
+        )
+        names = {item["name"] for item in listed["result"]["tools"]}
+        self.assertIn("get_workspace_summary", names)
+        expected_tools = {
+            "get_workspace_summary", "list_projects", "get_project",
+            "get_project_bible", "list_episodes", "get_episode",
+            "list_characters", "get_character", "list_prompts",
+            "list_production_gates", "update_project_bible",
+            "update_episode_planning", "replace_episode_shots",
+            "update_character_planning", "upsert_project_prompt",
+            "update_production_gates", "archive_content_record",
+            "restore_content_record", "delete_project", "delete_episode",
+            "delete_character", "delete_project_prompt",
+            "delete_episode_shot", "delete_production_gate",
+        }
+        self.assertTrue(expected_tools.issubset(names))
+        delete_tool = next(
+            item for item in listed["result"]["tools"]
+            if item["name"] == "delete_project"
+        )
+        self.assertTrue(delete_tool["annotations"]["destructiveHint"])
+        self.assertNotIn("delete_user", names)
+        self.assertFalse(any("admin" in name or "deployment" in name for name in names))
+        called, _ = mcp_request(
+            {
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "get_workspace_summary", "arguments": {}},
+            },
+            session_id,
+        )
+        self.assertIn("result", called)
+        written, _ = mcp_request(
+            {
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": {
+                    "name": "update_project_bible",
+                    "arguments": {
+                        "project_id": "transport-project",
+                        "expected_revision": transport_revision,
+                        "changes": {"logline": "Written through MCP transport"},
+                    },
+                },
+            },
+            session_id,
+        )
+        self.assertIn("result", written)
+        project = admin.request("/api/workspace")[1]["data"]["projects"][0]
+        self.assertEqual(
+            project["bible"]["logline"], "Written through MCP transport"
+        )
+
+    def test_20_mcp_service_isolation_conflicts_preservation_and_limits(self):
+        """Keep direct MCP operations scoped, revisioned, partial, and bounded."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        first = TestClient(self.base_url)
+        second = TestClient(self.base_url)
+        self.assertEqual(
+            first.register("mcpalice", "MCP Alice", "mcp-alice-password")[0],
+            201,
+        )
+        self.assertEqual(
+            second.register("mcpbob", "MCP Bob", "mcp-bob-password")[0],
+            201,
+        )
+        first_data = {
+            "projects": [{
+                "id": "alice-project", "title": "Alice project",
+                "description": "Keep this description",
+                "bible": {"logline": "Old logline"},
+                "episodes": [{
+                    "id": "EP01", "title": "Pilot", "hook": "Keep hook",
+                    "script": "Keep script", "synopsis": "", "beats": "",
+                    "shots": [{
+                        "id": "shot-a", "promptId": "prompt-a",
+                        "imagePrompt": "Frozen prompt snapshot",
+                    }],
+                }],
+                "characters": [{
+                    "id": "alice-cast", "name": "Alice cast",
+                    "look": "Keep appearance",
+                }],
+                "prompts": [{
+                    "id": "prompt-a", "name": "Alice style",
+                    "category": "style", "body": "Reusable prompt",
+                }],
+                "gates": [{"id": "gate-a", "name": "Manual review", "done": False}],
+            }, {
+                "id": "cascade-project", "title": "Cascade project",
+                "episodes": [{
+                    "id": "cascade-episode", "title": "Cascade episode",
+                    "shots": [{"id": "cascade-shot", "imagePrompt": "Snapshot"}],
+                }],
+                "characters": [{"id": "cascade-cast", "name": "Cascade cast"}],
+                "prompts": [{"id": "cascade-prompt", "name": "Cascade prompt"}],
+                "gates": [{"id": "cascade-gate", "name": "Cascade gate"}],
+            }],
+            "activeId": "alice-project",
+        }
+        second_data = {
+            "projects": [{
+                "id": "bob-project", "title": "Bob private project",
+                "episodes": [], "characters": [], "prompts": [], "gates": [],
+            }],
+            "activeId": "bob-project",
+        }
+        self.assertEqual(
+            first.request(
+                "/api/workspace", method="PUT",
+                payload={"revision": 0, "data": first_data},
+            )[0],
+            200,
+        )
+        self.assertEqual(
+            second.request(
+                "/api/workspace", method="PUT",
+                payload={"revision": 0, "data": second_data},
+            )[0],
+            200,
+        )
+        with sqlite3.connect(self.database_path) as database:
+            alice_id = database.execute(
+                "SELECT id FROM users WHERE username='mcpalice'"
+            ).fetchone()[0]
+            bob_id = database.execute(
+                "SELECT id FROM users WHERE username='mcpbob'"
+            ).fetchone()[0]
+            database.executemany(
+                """
+                INSERT INTO character_images
+                    (storage_id, user_id, character_id, mime_type, byte_size, created_at)
+                VALUES (?, ?, ?, 'image/png', 3, ?)
+                """,
+                (
+                    ("alice-image", alice_id, "alice-cast", int(time.time())),
+                    ("cascade-image", alice_id, "cascade-cast", int(time.time())),
+                ),
+            )
+        image_directory = self.database_path.parent / "images" / str(alice_id)
+        image_directory.mkdir(parents=True, exist_ok=True)
+        (image_directory / "alice-image").write_bytes(b"png")
+        (image_directory / "cascade-image").write_bytes(b"png")
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            alice_projects = mcp_service.list_projects(alice_id)["projects"]
+            self.assertEqual(
+                [item["id"] for item in alice_projects],
+                ["alice-project", "cascade-project"],
+            )
+            self.assertNotIn("Alice", json.dumps(mcp_service.list_projects(bob_id)))
+            saved = mcp_service.update_project_bible(
+                alice_id, "alice-project", 1, {"logline": "New logline"}
+            )
+            self.assertEqual(saved["revision"], 2)
+            episode = mcp_service.get_episode(
+                alice_id, "alice-project", "EP01"
+            )["episode"]
+            self.assertEqual(episode["hook"], "Keep hook")
+            self.assertEqual(episode["script"], "Keep script")
+            with self.assertRaises(mcp_service.ServiceError) as conflict:
+                mcp_service.update_episode_planning(
+                    alice_id, "alice-project", "EP01", 1, synopsis="Stale"
+                )
+            self.assertEqual(conflict.exception.code, "revision_conflict")
+            with self.assertRaises(mcp_service.ServiceError) as oversized:
+                mcp_service.update_episode_planning(
+                    alice_id, "alice-project", "EP01", 2,
+                    synopsis="x" * (mcp_service.MAX_TEXT + 1),
+                )
+            self.assertEqual(oversized.exception.code, "invalid_input")
+            archived = mcp_service.set_archive_state(
+                alice_id, "alice-project", "episode", "EP01", 2, True
+            )
+            restored = mcp_service.set_archive_state(
+                alice_id, "alice-project", "episode", "EP01",
+                archived["revision"], False,
+            )
+            self.assertGreater(restored["revision"], archived["revision"])
+            revision = restored["revision"]
+            with self.assertRaises(mcp_service.ServiceError) as mismatch:
+                mcp_service.delete_episode(
+                    alice_id, "alice-project", "EP01", revision, "pilot"
+                )
+            self.assertEqual(mismatch.exception.code, "confirmation_mismatch")
+            with self.assertRaises(mcp_service.ServiceError) as isolated:
+                mcp_service.delete_project(
+                    bob_id, "alice-project", 1, "Alice project"
+                )
+            self.assertEqual(isolated.exception.code, "not_found")
+
+            deleted_prompt = mcp_service.delete_project_prompt(
+                alice_id, "alice-project", "prompt-a", revision, "Alice style"
+            )
+            revision = deleted_prompt["revision"]
+            preserved = mcp_service.get_episode(
+                alice_id, "alice-project", "EP01"
+            )["episode"]["shots"][0]
+            self.assertEqual(preserved["imagePrompt"], "Frozen prompt snapshot")
+            self.assertEqual(deleted_prompt["receipt"]["shotSnapshotsPreserved"], True)
+
+            deleted_shot = mcp_service.delete_episode_shot(
+                alice_id, "alice-project", "EP01", "shot-a",
+                revision, "shot-a",
+            )
+            revision = deleted_shot["revision"]
+            deleted_gate = mcp_service.delete_production_gate(
+                alice_id, "alice-project", "gate-a", revision, "Manual review"
+            )
+            revision = deleted_gate["revision"]
+            deleted_character = mcp_service.delete_character(
+                alice_id, "alice-project", "alice-cast", revision, "Alice cast"
+            )
+            revision = deleted_character["revision"]
+            self.assertEqual(deleted_character["receipt"]["privateImagesDeleted"], 1)
+            self.assertFalse((image_directory / "alice-image").exists())
+            deleted_episode = mcp_service.delete_episode(
+                alice_id, "alice-project", "EP01", revision, "Pilot"
+            )
+            revision = deleted_episode["revision"]
+            self.assertEqual(deleted_episode["receipt"]["shotsDeleted"], 0)
+
+            cascade = mcp_service.delete_project(
+                alice_id, "cascade-project", revision, "Cascade project"
+            )
+            self.assertEqual(cascade["receipt"]["episodesDeleted"], 1)
+            self.assertEqual(cascade["receipt"]["charactersDeleted"], 1)
+            self.assertEqual(cascade["receipt"]["promptsDeleted"], 1)
+            self.assertEqual(cascade["receipt"]["shotsDeleted"], 1)
+            self.assertEqual(cascade["receipt"]["gatesDeleted"], 1)
+            self.assertEqual(cascade["receipt"]["privateImagesDeleted"], 1)
+            self.assertFalse((image_directory / "cascade-image").exists())
+            self.assertEqual(
+                [item["id"] for item in mcp_service.list_projects(alice_id)["projects"]],
+                ["alice-project"],
+            )
+            self.assertEqual(
+                [item["id"] for item in mcp_service.list_projects(bob_id)["projects"]],
+                ["bob-project"],
+            )
+            with sqlite3.connect(self.database_path) as database:
+                self.assertEqual(
+                    database.execute(
+                        "SELECT COUNT(*) FROM character_images WHERE user_id=?",
+                        (alice_id,),
+                    ).fetchone()[0],
+                    0,
+                )
 
 
 if __name__ == "__main__":

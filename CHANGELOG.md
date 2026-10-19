@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-10-19
+
+- Added an OAuth 2.1 authorization-code flow with S256 PKCE, discovery metadata, exact redirect validation, short access tokens, rotating refresh tokens, and revocation.
+- Added account-visible connected integrations with narrow read and write scopes.
+- Added an official-SDK Streamable HTTP MCP endpoint at /mcp.
+- Added account-scoped read, planning update, prompt, gate, archive, restore, and separately confirmed permanent-delete tools with optimistic workspace revision conflicts.
+- Added bounded tool schemas, structured errors, request limiting, precise deletion receipts, and MCP safety annotations.
+- Added additive schema version 5 tables for OAuth clients, flows, codes, grants, hashed tokens, and MCP rate limits.
+- Added proxy-safe OAuth public-write limits, a bounded expiring client policy, per-token effective scopes, and MCP-aware container health.
+- Added OAuth, transport, scope, expiry, isolation, migration, conflict, preservation, limit, and deletion tests.
+- Prepared release and upgrade documentation without creating a tag, GitHub Release, OAuth client, or deployment.
+
 ## 0.2.0 - 2026-10-18
 
 - Added editable project details and structured project Bible sections.

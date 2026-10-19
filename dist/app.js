@@ -193,6 +193,36 @@
     byId("toolAdminActions").classList.toggle("hidden", session.user.role !== "admin");
   }
 
+  function renderIntegrations(items) {
+    byId("integrationList").innerHTML = items.length ? items.map(function (item) {
+      var created = new Date(item.createdAt * 1000).toLocaleString();
+      var used = item.lastUsedAt ? new Date(item.lastUsedAt * 1000).toLocaleString() : "Not used yet";
+      return '<article class="gate-row" data-integration-id="' + item.id + '"><div><strong>' +
+        escapeHtml(item.clientName) + '</strong><p class="muted">Scopes: ' +
+        escapeHtml(item.scopes.join(", ")) + '<br>Created: ' + escapeHtml(created) +
+        '<br>Last used: ' + escapeHtml(used) + '</p></div><button class="btn danger" ' +
+        'data-revoke-integration type="button">Revoke</button></article>';
+    }).join("") : '<div class="card empty"><h3>No connected integrations</h3><p>Clients you authorize through OAuth will appear here.</p></div>';
+  }
+
+  async function loadIntegrations() {
+    if (!session) { return; }
+    try {
+      renderIntegrations((await api("/api/account/integrations")).integrations);
+    } catch (error) {
+      setStatus(byId("integrationStatus"), error.message, "error");
+    }
+  }
+
+  async function copyMcpEndpoint() {
+    try {
+      await navigator.clipboard.writeText(window.location.origin + "/mcp");
+      setStatus(byId("integrationStatus"), "MCP endpoint copied.", "success");
+    } catch (error) {
+      setStatus(byId("integrationStatus"), "Copy failed. Use " + window.location.origin + "/mcp", "error");
+    }
+  }
+
   async function loadWorkspace() {
     var loaded = await api("/api/workspace");
     revision = loaded.revision;
@@ -216,7 +246,7 @@
     applyTheme(session.user.theme, false);
     populateAccount();
     scheduleExpiry();
-    await Promise.all([loadWorkspace(), loadTools()]);
+    await Promise.all([loadWorkspace(), loadTools(), loadIntegrations()]);
     byId("authView").classList.add("hidden");
     dismissBootstrap();
     byId("appView").classList.remove("hidden");
@@ -711,6 +741,20 @@
 
   byId("profileForm").addEventListener("submit", async function (event) { event.preventDefault(); try { session.user = (await api("/api/account", {method: "PUT", body: {displayName: byId("accountDisplayName").value.trim()}})).user; populateAccount(); setStatus(byId("profileStatus"), "Profile saved.", "success"); } catch (error) { setStatus(byId("profileStatus"), error.message, "error"); } });
   byId("passwordForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/account", {method: "PUT", body: {currentPassword: byId("currentPassword").value, newPassword: byId("newPassword").value}}); byId("passwordForm").reset(); showSignedOut(result.message || "Password changed. Sign in again."); } catch (error) { setStatus(byId("passwordStatus"), error.message, "error"); } });
+  byId("copyMcpEndpoint").addEventListener("click", copyMcpEndpoint);
+  byId("integrationList").addEventListener("click", async function (event) {
+    var button = event.target.closest("[data-revoke-integration]");
+    if (!button) { return; }
+    var row = button.closest("[data-integration-id]");
+    if (!window.confirm("Revoke this integration and invalidate all of its tokens?")) { return; }
+    try {
+      await api("/api/account/integrations/" + row.dataset.integrationId, {method: "DELETE"});
+      setStatus(byId("integrationStatus"), "Integration revoked.", "success");
+      await loadIntegrations();
+    } catch (error) {
+      setStatus(byId("integrationStatus"), error.message, "error");
+    }
+  });
   byId("registrationSettingsForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/admin/settings", {method: "PUT", body: {registrationEnabled: byId("registrationEnabled").checked}}); byId("registrationPrompt").dataset.enabled = result.registrationEnabled ? "true" : ""; setStatus(byId("adminSettingsStatus"), "Registration setting saved.", "success"); } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); } });
   byId("userList").addEventListener("click", async function (event) { var button = event.target.closest("[data-user-action]"); if (!button) { return; } var row = button.closest("[data-user-row]"); var action = button.dataset.userAction; if (action === "delete" && !window.confirm("Permanently delete this account, its workspace, and all uploaded assets? This cannot be undone.")) { return; } if (["disable", "archive"].includes(action) && !window.confirm((action === "disable" ? "Disable sign-in" : "Archive this account") + " while retaining its workspace and uploads?")) { return; } try { if (action === "delete") { await api("/api/admin/users/" + row.dataset.userRow, {method: "DELETE"}); } else { await api("/api/admin/users/" + row.dataset.userRow, {method: "PUT", body: {action: action, role: row.querySelector("[data-user-role]").value}}); } await loadAdmin(); } catch (error) { window.alert(error.message); } });
 

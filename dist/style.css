@@ -1517,3 +1517,15 @@ p {
   .gate-row { grid-template-columns: auto minmax(0, 1fr); }
   .gate-row .btn { grid-column: 1 / -1; width: 100%; }
 }
+
+.integrations-panel{margin-top:1rem}
+.integrations-panel .gate-row{align-items:flex-start}
+.integrations-panel .gate-row>div{min-width:0}
+.oauth-page{
+  min-height:100vh;
+  display:grid;
+  place-items:center;
+  padding:clamp(1rem,4vw,3rem);
+}
+.oauth-page>.panel{width:min(36rem,100%)}
+.oauth-page form{display:grid;gap:1rem}

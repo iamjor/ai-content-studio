@@ -1,7 +1,10 @@
 """Multi-user AI Content Studio API and static host using Python's standard library."""
 
+import base64
 import hashlib
 import hmac
+import html
+import http.client
 import ipaddress
 import json
 import os
@@ -13,10 +16,10 @@ import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 APP_NAME = "AI Content Studio"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT / "dist"
 DB_PATH = Path(os.environ.get("AICS_DB_PATH", "/data/studio.sqlite3"))
@@ -24,6 +27,22 @@ IMAGE_ROOT_OVERRIDE = os.environ.get("AICS_IMAGE_ROOT", "").strip()
 MAX_BYTES = 2_000_000
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 AUTH_MAX_BYTES = 4_096
+OAUTH_MAX_BYTES = 32_768
+OAUTH_CODE_SECONDS = 5 * 60
+OAUTH_ACCESS_SECONDS = 60 * 60
+OAUTH_REFRESH_SECONDS = 30 * 24 * 60 * 60
+OAUTH_SCOPES = {"aics.read", "aics.write"}
+OAUTH_PUBLIC_WINDOW_SECONDS = 60
+OAUTH_REGISTRATION_LIMIT = 10
+OAUTH_AUTHORIZATION_LIMIT = 30
+OAUTH_SOURCE_LIMIT = 4_096
+OAUTH_CLIENT_LIMIT = max(1, int(os.environ.get("AICS_OAUTH_CLIENT_LIMIT", "1000")))
+OAUTH_FLOW_LIMIT = max(1, int(os.environ.get("AICS_OAUTH_FLOW_LIMIT", "5000")))
+OAUTH_CLIENT_TTL_SECONDS = 30 * 24 * 60 * 60
+MCP_INTERNAL_PORT = int(os.environ.get("AICS_MCP_INTERNAL_PORT", "8788"))
+PUBLIC_BASE_URL = os.environ.get(
+    "AICS_PUBLIC_BASE_URL", "http://127.0.0.1:8787"
+).rstrip("/")
 PASSWORD_ITERATIONS = 600_000
 LOGIN_LIMIT = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
@@ -162,6 +181,57 @@ def validate_https_url(value):
     return parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username
 
 
+def validate_public_base_url(value):
+    """Accept HTTPS origins, plus loopback HTTP for local development only."""
+    if not isinstance(value, str) or len(value) > 500:
+        return False
+    parsed = urlsplit(value)
+    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    return (
+        bool(parsed.netloc)
+        and not parsed.username
+        and not parsed.path.rstrip("/")
+        and not parsed.query
+        and not parsed.fragment
+        and (parsed.scheme == "https" or (parsed.scheme == "http" and loopback))
+    )
+
+
+def validate_redirect_uri(value):
+    """Validate an exact OAuth redirect URI without permitting open redirects."""
+    if not isinstance(value, str) or len(value) > 1000:
+        return False
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc or parsed.fragment or parsed.username:
+        return False
+    if parsed.scheme == "https":
+        return True
+    return parsed.scheme == "http" and parsed.hostname in {
+        "localhost", "127.0.0.1", "::1"
+    }
+
+
+def token_hash(token):
+    """Hash a high-entropy OAuth secret before database storage."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def pkce_challenge(verifier):
+    """Return the RFC 7636 S256 challenge for a code verifier."""
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def parse_scopes(value):
+    """Return a validated, normalized OAuth scope string or raise ValueError."""
+    if not isinstance(value, str):
+        raise ValueError("Invalid scope")
+    scopes = set(value.split())
+    if not scopes or not scopes.issubset(OAUTH_SCOPES):
+        raise ValueError("Invalid scope")
+    return " ".join(sorted(scopes))
+
+
 def detect_image_type(data):
     """Return a MIME type only for structurally plausible supported images."""
     if (
@@ -229,6 +299,21 @@ def normalize_workspace_data(data):
         if not isinstance(project.get("gates"), list):
             project["gates"] = []
             changed = True
+        for prompt in project["prompts"]:
+            if not isinstance(prompt, dict):
+                continue
+            if not prompt.get("id"):
+                prompt["id"] = "prompt-" + secrets.token_hex(12)
+                changed = True
+            if "archived" not in prompt:
+                prompt["archived"] = False
+                changed = True
+        for gate in project["gates"]:
+            if not isinstance(gate, dict):
+                continue
+            if not gate.get("id"):
+                gate["id"] = "gate-" + secrets.token_hex(12)
+                changed = True
         for episode in project.get("episodes", []):
             if not isinstance(episode, dict):
                 continue
@@ -242,6 +327,12 @@ def normalize_workspace_data(data):
                     field == "shots" and not isinstance(episode[field], list)
                 ):
                     episode[field] = default
+                    changed = True
+            for shot in episode["shots"]:
+                if not isinstance(shot, dict):
+                    continue
+                if not shot.get("id"):
+                    shot["id"] = "shot-" + secrets.token_hex(12)
                     changed = True
         for character in project.get("characters", []):
             if not isinstance(character, dict):
@@ -301,6 +392,10 @@ def registration_enabled(database):
 
 def setup():
     """Create the multi-user schema and safely adopt the legacy owner workspace."""
+    if not validate_public_base_url(PUBLIC_BASE_URL):
+        raise RuntimeError(
+            "AICS_PUBLIC_BASE_URL must be an HTTPS origin or a loopback HTTP origin"
+        )
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as database:
         database.execute("PRAGMA journal_mode=WAL").fetchone()
@@ -363,6 +458,63 @@ def setup():
             );
             CREATE INDEX IF NOT EXISTS character_images_user
                 ON character_images(user_id);
+            CREATE TABLE IF NOT EXISTS oauth_clients (
+                client_id TEXT PRIMARY KEY,
+                client_name TEXT NOT NULL,
+                redirect_uris TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_flows (
+                flow_hash TEXT PRIMARY KEY,
+                request_data TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_codes (
+                code_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+                redirect_uri TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                code_challenge TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_grants (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+                scopes TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_used_at INTEGER,
+                revoked_at INTEGER,
+                UNIQUE(user_id, client_id)
+            );
+            CREATE TABLE IF NOT EXISTS oauth_tokens (
+                token_hash TEXT PRIMARY KEY,
+                grant_id INTEGER NOT NULL REFERENCES oauth_grants(id) ON DELETE CASCADE,
+                token_type TEXT NOT NULL CHECK(token_type IN ('access', 'refresh')),
+                family_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                scopes TEXT NOT NULL DEFAULT '',
+                used_at INTEGER,
+                revoked_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS oauth_tokens_grant ON oauth_tokens(grant_id);
+            CREATE INDEX IF NOT EXISTS oauth_tokens_expiry ON oauth_tokens(expires_at);
+            CREATE TABLE IF NOT EXISTS mcp_rate_limits (
+                token_hash TEXT PRIMARY KEY,
+                window_started INTEGER NOT NULL,
+                request_count INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_source_limits (
+                scope_hash TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                window_started INTEGER NOT NULL,
+                request_count INTEGER NOT NULL,
+                PRIMARY KEY(scope_hash, purpose)
+            );
             """
         )
         user_columns = {
@@ -370,6 +522,13 @@ def setup():
         }
         if "archived_at" not in user_columns:
             database.execute("ALTER TABLE users ADD COLUMN archived_at INTEGER")
+        token_columns = {
+            row["name"] for row in database.execute("PRAGMA table_info(oauth_tokens)")
+        }
+        if "scopes" not in token_columns:
+            database.execute(
+                "ALTER TABLE oauth_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"
+            )
         try:
             previous_schema = int(get_setting(database, "schema_version", "0"))
         except ValueError:
@@ -393,7 +552,7 @@ def setup():
                 "registration_enabled",
                 "1" if REGISTRATION_DEFAULT else "0",
             )
-        set_setting(database, "schema_version", "4")
+        set_setting(database, "schema_version", "5")
 
         admin = database.execute(
             "SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1"
@@ -495,6 +654,59 @@ def public_user(row):
     }
 
 
+def resolve_access_token(raw_token, required_scope=None, touch=False):
+    """Resolve an active bearer token to its owner without exposing stored secrets."""
+    if not isinstance(raw_token, str) or len(raw_token) < 32:
+        return None
+    now = int(time.time())
+    digest = token_hash(raw_token)
+    with connect() as database:
+        row = database.execute(
+            """
+            SELECT t.token_hash, t.expires_at, g.id AS grant_id,
+                   COALESCE(NULLIF(t.scopes, ''), g.scopes) AS scopes,
+                   g.user_id, c.client_id, c.client_name
+            FROM oauth_tokens t
+            JOIN oauth_grants g ON g.id=t.grant_id
+            JOIN oauth_clients c ON c.client_id=g.client_id
+            JOIN users u ON u.id=g.user_id
+            WHERE t.token_hash=? AND t.token_type='access'
+              AND t.revoked_at IS NULL AND g.revoked_at IS NULL
+              AND t.expires_at>? AND u.is_active=1 AND u.archived_at IS NULL
+            """,
+            (digest, now),
+        ).fetchone()
+        if not row or (
+            required_scope and required_scope not in row["scopes"].split()
+        ):
+            return None
+        if touch:
+            database.execute(
+                "UPDATE oauth_tokens SET used_at=? WHERE token_hash=?",
+                (now, digest),
+            )
+            database.execute(
+                "UPDATE oauth_grants SET last_used_at=? WHERE id=?",
+                (now, row["grant_id"]),
+            )
+        return dict(row)
+
+
+def revoke_user_oauth(database, user_id, now):
+    """Revoke every integration grant and token for one account."""
+    database.execute(
+        "UPDATE oauth_grants SET revoked_at=? WHERE user_id=?",
+        (now, user_id),
+    )
+    database.execute(
+        """
+        UPDATE oauth_tokens SET revoked_at=?
+        WHERE grant_id IN (SELECT id FROM oauth_grants WHERE user_id=?)
+        """,
+        (now, user_id),
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     """Serve static assets and the authenticated JSON API."""
 
@@ -567,6 +779,25 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > max_bytes:
             raise ValueError("Invalid request size")
         return self.rfile.read(length)
+
+    def read_form(self, max_bytes=OAUTH_MAX_BYTES):
+        """Read a bounded URL-encoded form and reject repeated fields."""
+        raw = self.read_body(max_bytes)
+        try:
+            parsed = parse_qs(
+                raw.decode("utf-8"), keep_blank_values=True, strict_parsing=True
+            )
+        except (UnicodeDecodeError, ValueError) as error:
+            raise ValueError("Invalid form") from error
+        if any(len(values) != 1 for values in parsed.values()):
+            raise ValueError("Repeated form field")
+        return {key: values[0] for key, values in parsed.items()}
+
+    def redirect(self, location, extra=None):
+        """Send a no-store redirect to an already validated exact URL."""
+        headers = [("Location", location)]
+        headers.extend(extra or [])
+        return self.reply(302, b"", "text/plain; charset=utf-8", headers)
 
     def same_origin_request(self):
         """Reject browser state changes that explicitly originate off-site."""
@@ -693,6 +924,19 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/healthz":
             return self.json_reply(200, {"ok": True})
+        if path == "/mcp/ready":
+            return self.mcp_readiness()
+        if path in {
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+        }:
+            return self.oauth_protected_resource_metadata()
+        if path == "/.well-known/oauth-authorization-server":
+            return self.oauth_authorization_metadata()
+        if path == "/oauth/authorize":
+            return self.oauth_authorize_page()
+        if path == "/mcp":
+            return self.proxy_mcp()
         if self.static_response(path):
             return None
         if path == "/api/session":
@@ -720,6 +964,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.get_workspace(session)
         if path == "/api/account":
             return self.json_reply(200, {"user": public_user(session)})
+        if path == "/api/account/integrations":
+            return self.get_integrations(session)
         if path == "/api/tools":
             return self.get_tools(session)
         if path.startswith("/api/characters/") and path.endswith("/image"):
@@ -734,9 +980,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Route login, registration, and logout requests."""
+        path = urlsplit(self.path).path
+        if path == "/mcp":
+            return self.proxy_mcp()
+        if path == "/oauth/register":
+            return self.oauth_register()
+        if path == "/oauth/token":
+            return self.oauth_token()
+        if path == "/oauth/revoke":
+            return self.oauth_revoke()
+        if path == "/oauth/authorize":
+            return self.oauth_authorize_submit()
         if not self.same_origin_request():
             return self.json_reply(403, {"error": "Cross-site request rejected."})
-        path = urlsplit(self.path).path
         if path == "/api/login":
             return self.login()
         if path == "/api/register":
@@ -788,9 +1044,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         """Route destructive actions with role and CSRF enforcement."""
+        path = urlsplit(self.path).path
+        if path == "/mcp":
+            return self.proxy_mcp()
         if not self.same_origin_request():
             return self.json_reply(403, {"error": "Cross-site request rejected."})
-        path = urlsplit(self.path).path
         session = self.require_session(
             admin=path.startswith("/api/admin/"), csrf=True
         )
@@ -802,7 +1060,750 @@ class Handler(BaseHTTPRequestHandler):
             return self.delete_tool(path)
         if path.startswith("/api/characters/") and path.endswith("/image"):
             return self.delete_character_image(path, session)
+        if path.startswith("/api/account/integrations/"):
+            return self.revoke_integration(path, session)
         return self.json_reply(404, {"error": "Not found"})
+
+    def oauth_authorization_metadata(self):
+        """Publish OAuth server discovery metadata for remote MCP clients."""
+        return self.json_reply(
+            200,
+            {
+                "issuer": PUBLIC_BASE_URL,
+                "authorization_endpoint": PUBLIC_BASE_URL + "/oauth/authorize",
+                "token_endpoint": PUBLIC_BASE_URL + "/oauth/token",
+                "registration_endpoint": PUBLIC_BASE_URL + "/oauth/register",
+                "revocation_endpoint": PUBLIC_BASE_URL + "/oauth/revoke",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
+                "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["none"],
+                "scopes_supported": sorted(OAUTH_SCOPES),
+            },
+        )
+
+    def oauth_protected_resource_metadata(self):
+        """Publish RFC 9728 metadata for the account-scoped MCP resource."""
+        return self.json_reply(
+            200,
+            {
+                "resource": PUBLIC_BASE_URL + "/mcp",
+                "authorization_servers": [PUBLIC_BASE_URL],
+                "scopes_supported": sorted(OAUTH_SCOPES),
+                "bearer_methods_supported": ["header"],
+            },
+        )
+
+    def oauth_error(self, status, error, description, headers=None):
+        """Return a structured OAuth error without reflecting credentials."""
+        response_headers = {"Pragma": "no-cache", **(headers or {})}
+        return self.json_reply(
+            status,
+            {"error": error, "error_description": description},
+            response_headers,
+        )
+
+    def oauth_register(self):
+        """Register a bounded public OAuth client with exact redirect URIs."""
+        try:
+            value = self.read_json(OAUTH_MAX_BYTES)
+            allowed = {
+                "client_name", "redirect_uris", "grant_types",
+                "response_types", "token_endpoint_auth_method",
+            }
+            if set(value) - allowed:
+                raise ValueError("Unknown field")
+            raw_name = value["client_name"]
+            if not isinstance(raw_name, str):
+                raise ValueError("Invalid client name")
+            name = raw_name.strip()
+            redirect_uris = value["redirect_uris"]
+            if (
+                not name
+                or len(name) > 120
+                or not isinstance(redirect_uris, list)
+                or not 1 <= len(redirect_uris) <= 10
+                or len(set(redirect_uris)) != len(redirect_uris)
+                or not all(validate_redirect_uri(item) for item in redirect_uris)
+                or value.get("grant_types", ["authorization_code", "refresh_token"])
+                != ["authorization_code", "refresh_token"]
+                or value.get("response_types", ["code"]) != ["code"]
+                or value.get("token_endpoint_auth_method", "none") != "none"
+            ):
+                raise ValueError("Invalid client metadata")
+        except (KeyError, TypeError, ValueError):
+            return self.oauth_error(
+                400, "invalid_client_metadata", "Provide valid public client metadata."
+            )
+        client_id = "aics-client-" + secrets.token_urlsafe(24)
+        now = int(time.time())
+        with connect() as database:
+            accepted, retry_after = self.reserve_oauth_source(
+                database, "registration", now, OAUTH_REGISTRATION_LIMIT
+            )
+            if not accepted:
+                return self.oauth_error(
+                    429,
+                    "slow_down",
+                    "Too many client registration requests.",
+                    {"Retry-After": str(retry_after)},
+                )
+            self.cleanup_expired_oauth_records(database, now)
+            client_count = database.execute(
+                "SELECT COUNT(*) FROM oauth_clients"
+            ).fetchone()[0]
+            if client_count >= OAUTH_CLIENT_LIMIT:
+                return self.oauth_error(
+                    503,
+                    "temporarily_unavailable",
+                    "The public client registration limit has been reached.",
+                )
+            database.execute(
+                """
+                INSERT INTO oauth_clients
+                    (client_id, client_name, redirect_uris, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (client_id, name, json.dumps(redirect_uris), now),
+            )
+        return self.json_reply(
+            201,
+            {
+                "client_id": client_id,
+                "client_name": name,
+                "redirect_uris": redirect_uris,
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+
+    def validated_authorization_request(self, values):
+        """Validate an authorization request and return normalized saved fields."""
+        allowed = {
+            "response_type", "client_id", "redirect_uri", "scope", "state",
+            "code_challenge", "code_challenge_method", "resource",
+        }
+        if set(values) - allowed or values.get("response_type") != "code":
+            raise ValueError("Invalid authorization request")
+        client_id = values.get("client_id", "")
+        redirect_uri = values.get("redirect_uri", "")
+        state = values.get("state", "")
+        challenge = values.get("code_challenge", "")
+        resource = values.get("resource", PUBLIC_BASE_URL + "/mcp")
+        if (
+            not isinstance(state, str)
+            or len(state) > 512
+            or values.get("code_challenge_method") != "S256"
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", challenge)
+            or resource != PUBLIC_BASE_URL + "/mcp"
+        ):
+            raise ValueError("Invalid authorization request")
+        scopes = parse_scopes(values.get("scope", "aics.read"))
+        with connect() as database:
+            client = database.execute(
+                "SELECT client_name, redirect_uris FROM oauth_clients WHERE client_id=?",
+                (client_id,),
+            ).fetchone()
+        if not client or redirect_uri not in json.loads(client["redirect_uris"]):
+            raise ValueError("Invalid client or redirect URI")
+        return {
+            "client_id": client_id,
+            "client_name": client["client_name"],
+            "redirect_uri": redirect_uri,
+            "scope": scopes,
+            "state": state,
+            "code_challenge": challenge,
+            "resource": resource,
+        }
+
+    def oauth_flow_cookie(self, raw_flow, max_age):
+        """Build the short-lived cookie that binds consent POST to its browser."""
+        parts = [
+            "AICS_OAUTH_FLOW=" + raw_flow,
+            "Path=/oauth/authorize",
+            "HttpOnly",
+            "SameSite=Lax",
+            "Max-Age=" + str(max_age),
+        ]
+        if COOKIE_SECURE:
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def oauth_flow_token(self):
+        """Read the short-lived OAuth consent binding cookie."""
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return ""
+        morsel = cookie.get("AICS_OAUTH_FLOW")
+        return morsel.value if morsel else ""
+
+    def oauth_authorize_page(self):
+        """Validate an OAuth request and render account login plus explicit consent."""
+        now = int(time.time())
+        with connect() as database:
+            self.cleanup_expired_oauth_records(database, now)
+        try:
+            query = parse_qs(
+                urlsplit(self.path).query,
+                keep_blank_values=True,
+                strict_parsing=True,
+            )
+            if any(len(values) != 1 for values in query.values()):
+                raise ValueError("Repeated parameter")
+            request_data = self.validated_authorization_request(
+                {key: values[0] for key, values in query.items()}
+            )
+        except ValueError:
+            return self.oauth_error(
+                400, "invalid_request", "The authorization request is invalid."
+            )
+        raw_flow = secrets.token_urlsafe(32)
+        with connect() as database:
+            accepted, retry_after = self.reserve_oauth_source(
+                database, "authorization", now, OAUTH_AUTHORIZATION_LIMIT
+            )
+            if not accepted:
+                return self.oauth_error(
+                    429,
+                    "slow_down",
+                    "Too many authorization requests.",
+                    {"Retry-After": str(retry_after)},
+                )
+            self.cleanup_expired_oauth_records(database, now)
+            flow_count = database.execute(
+                "SELECT COUNT(*) FROM oauth_flows"
+            ).fetchone()[0]
+            if flow_count >= OAUTH_FLOW_LIMIT:
+                return self.oauth_error(
+                    503,
+                    "temporarily_unavailable",
+                    "The active authorization request limit has been reached.",
+                )
+            database.execute(
+                """
+                INSERT INTO oauth_flows
+                    (flow_hash, request_data, created_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    token_hash(raw_flow),
+                    json.dumps(request_data),
+                    now,
+                    now + OAUTH_CODE_SECONDS,
+                ),
+            )
+        session = self.current_session()
+        identity = (
+            "<p>Signed in as <strong>"
+            + html.escape(session["display_name"])
+            + "</strong>.</p>"
+            if session
+            else (
+                '<label>Username<input name="username" autocomplete="username" '
+                'required maxlength="40"></label>'
+                '<label>Password<input name="password" type="password" '
+                'autocomplete="current-password" required maxlength="256"></label>'
+            )
+        )
+        scope_items = "".join(
+            "<li>"
+            + (
+                "Read your project planning records"
+                if scope == "aics.read"
+                else "Create and update your project planning records"
+            )
+            + "</li>"
+            for scope in request_data["scope"].split()
+        )
+        page = (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>Authorize integration</title><link rel=\"stylesheet\" href=\"/style.css\">"
+            "</head><body><main class=\"oauth-page\"><section class=\"panel\">"
+            "<p class=\"eyebrow\">Connected integration</p><h1>Authorize "
+            + html.escape(request_data["client_name"])
+            + "</h1><p>This client is requesting permission to:</p><ul>"
+            + scope_items
+            + '</ul><form method="post" action="/oauth/authorize">'
+            + identity
+            + '<input type="hidden" name="flow" value="'
+            + html.escape(raw_flow)
+            + '"><div class="action-row"><button class="btn" name="decision" '
+            'value="deny" type="submit">Deny</button><button class="btn primary" '
+            'name="decision" value="approve" type="submit">Authorize</button>'
+            "</div></form></section></main></body></html>"
+        ).encode("utf-8")
+        return self.reply(
+            200,
+            page,
+            "text/html; charset=utf-8",
+            [("Set-Cookie", self.oauth_flow_cookie(raw_flow, OAUTH_CODE_SECONDS))],
+        )
+
+    def oauth_authorize_submit(self):
+        """Authenticate if needed, consume consent, and issue a one-time code."""
+        try:
+            form = self.read_form()
+            raw_flow = form.get("flow", "")
+            cookie_flow = self.oauth_flow_token()
+            if (
+                not raw_flow
+                or not cookie_flow
+                or not hmac.compare_digest(raw_flow, cookie_flow)
+            ):
+                raise ValueError("Flow mismatch")
+            now = int(time.time())
+            with connect() as database:
+                database.execute("BEGIN IMMEDIATE")
+                row = database.execute(
+                    """
+                    SELECT request_data FROM oauth_flows
+                    WHERE flow_hash=? AND expires_at>?
+                    """,
+                    (token_hash(raw_flow), now),
+                ).fetchone()
+                database.execute(
+                    "DELETE FROM oauth_flows WHERE flow_hash=?",
+                    (token_hash(raw_flow),),
+                )
+            if not row:
+                raise ValueError("Expired flow")
+            request_data = json.loads(row["request_data"])
+        except (ValueError, json.JSONDecodeError):
+            return self.oauth_error(
+                400, "invalid_request", "The authorization request expired."
+            )
+        redirect_uri = request_data["redirect_uri"]
+        state = request_data["state"]
+        if form.get("decision") != "approve":
+            query = {"error": "access_denied"}
+            if state:
+                query["state"] = state
+            separator = "&" if urlsplit(redirect_uri).query else "?"
+            return self.redirect(redirect_uri + separator + urlencode(query))
+        session = self.current_session()
+        user_id = session["id"] if session else None
+        if not user_id:
+            username = form.get("username", "")
+            password = form.get("password", "")
+            if (
+                not isinstance(username, str)
+                or not isinstance(password, str)
+                or not username.strip()
+                or len(username) > 40
+                or not password
+                or len(password) > 256
+            ):
+                return self.oauth_error(401, "access_denied", "Sign-in failed.")
+            attempt_scope = self.attempt_scope("oauth-consent-login")
+            now = int(time.time())
+            with connect() as database:
+                accepted, remaining, block_after_failure = self.reserve_attempt(
+                    database, attempt_scope, now, LOGIN_LIMIT
+                )
+                if not accepted:
+                    return self.oauth_error(
+                        429, "temporarily_unavailable",
+                        "Too many sign-in attempts. Try again later.",
+                        {"Retry-After": str(remaining)},
+                    )
+                user = database.execute(
+                    """
+                    SELECT * FROM users
+                    WHERE username=? COLLATE NOCASE AND is_active=1
+                      AND archived_at IS NULL
+                    """,
+                    (username.strip(),),
+                ).fetchone()
+            encoded = user["password_hash"] if user else DUMMY_PASSWORD_HASH
+            if not verify_password(password, encoded) or not user:
+                if block_after_failure:
+                    return self.oauth_error(
+                        429, "temporarily_unavailable",
+                        "Too many sign-in attempts. Try again later.",
+                        {"Retry-After": str(block_after_failure)},
+                    )
+                return self.oauth_error(401, "access_denied", "Sign-in failed.")
+            with connect() as database:
+                self.release_login_attempt(database, attempt_scope)
+            user_id = user["id"]
+        raw_code = secrets.token_urlsafe(32)
+        with connect() as database:
+            database.execute(
+                """
+                INSERT INTO oauth_codes
+                    (code_hash, user_id, client_id, redirect_uri, scopes,
+                     code_challenge, resource, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token_hash(raw_code), user_id, request_data["client_id"],
+                    redirect_uri, request_data["scope"],
+                    request_data["code_challenge"], request_data["resource"],
+                    int(time.time()) + OAUTH_CODE_SECONDS,
+                ),
+            )
+        query = {"code": raw_code, "iss": PUBLIC_BASE_URL}
+        if state:
+            query["state"] = state
+        separator = "&" if urlsplit(redirect_uri).query else "?"
+        return self.redirect(
+            redirect_uri + separator + urlencode(query),
+            [("Set-Cookie", self.oauth_flow_cookie("", 0))],
+        )
+
+    def issue_oauth_pair(self, database, grant_id, scopes, family_id=None):
+        """Create one short access token and one rotating refresh token."""
+        now = int(time.time())
+        family_id = family_id or secrets.token_hex(24)
+        access = secrets.token_urlsafe(48)
+        refresh = secrets.token_urlsafe(48)
+        database.executemany(
+            """
+            INSERT INTO oauth_tokens
+                (token_hash, grant_id, token_type, family_id, created_at, expires_at, scopes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    token_hash(access), grant_id, "access", family_id,
+                    now, now + OAUTH_ACCESS_SECONDS, scopes,
+                ),
+                (
+                    token_hash(refresh), grant_id, "refresh", family_id,
+                    now, now + OAUTH_REFRESH_SECONDS, scopes,
+                ),
+            ),
+        )
+        return access, refresh
+
+    def oauth_token(self):
+        """Exchange a PKCE code or rotate a refresh token."""
+        try:
+            form = self.read_form()
+        except ValueError:
+            return self.oauth_error(400, "invalid_request", "Invalid token request.")
+        grant_type = form.get("grant_type")
+        if grant_type == "authorization_code":
+            return self.oauth_authorization_code_token(form)
+        if grant_type == "refresh_token":
+            return self.oauth_refresh_token(form)
+        return self.oauth_error(
+            400, "unsupported_grant_type", "Use authorization_code or refresh_token."
+        )
+
+    def oauth_authorization_code_token(self, form):
+        """Consume one authorization code after exact redirect and PKCE checks."""
+        code = form.get("code", "")
+        verifier = form.get("code_verifier", "")
+        client_id = form.get("client_id", "")
+        redirect_uri = form.get("redirect_uri", "")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", verifier)
+            or form.get("resource", PUBLIC_BASE_URL + "/mcp")
+            != PUBLIC_BASE_URL + "/mcp"
+        ):
+            return self.oauth_error(400, "invalid_grant", "PKCE verification failed.")
+        now = int(time.time())
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            row = database.execute(
+                "SELECT * FROM oauth_codes WHERE code_hash=?",
+                (token_hash(code),),
+            ).fetchone()
+            if row:
+                database.execute(
+                    "DELETE FROM oauth_codes WHERE code_hash=?",
+                    (token_hash(code),),
+                )
+            if (
+                not row
+                or row["expires_at"] <= now
+                or row["client_id"] != client_id
+                or row["redirect_uri"] != redirect_uri
+                or row["resource"] != PUBLIC_BASE_URL + "/mcp"
+                or not hmac.compare_digest(
+                    row["code_challenge"], pkce_challenge(verifier)
+                )
+            ):
+                return self.oauth_error(
+                    400, "invalid_grant", "The authorization code is invalid."
+                )
+            database.execute(
+                """
+                INSERT INTO oauth_grants
+                    (user_id, client_id, scopes, created_at, revoked_at)
+                VALUES (?, ?, ?, ?, NULL)
+                ON CONFLICT(user_id, client_id) DO UPDATE SET
+                    scopes=excluded.scopes, created_at=excluded.created_at,
+                    revoked_at=NULL
+                """,
+                (row["user_id"], client_id, row["scopes"], now),
+            )
+            grant = database.execute(
+                "SELECT id FROM oauth_grants WHERE user_id=? AND client_id=?",
+                (row["user_id"], client_id),
+            ).fetchone()
+            database.execute(
+                "UPDATE oauth_tokens SET revoked_at=? WHERE grant_id=? AND revoked_at IS NULL",
+                (now, grant["id"]),
+            )
+            access, refresh = self.issue_oauth_pair(
+                database, grant["id"], row["scopes"]
+            )
+        return self.oauth_token_response(access, refresh, row["scopes"])
+
+    def oauth_refresh_token(self, form):
+        """Rotate a refresh token and revoke its family on replay."""
+        raw_refresh = form.get("refresh_token", "")
+        client_id = form.get("client_id", "")
+        now = int(time.time())
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            row = database.execute(
+                """
+                SELECT t.*,
+                       COALESCE(NULLIF(t.scopes, ''), g.scopes) AS effective_scopes,
+                       g.client_id, g.revoked_at AS grant_revoked
+                FROM oauth_tokens t
+                JOIN oauth_grants g ON g.id=t.grant_id
+                WHERE t.token_hash=? AND t.token_type='refresh'
+                """,
+                (token_hash(raw_refresh),),
+            ).fetchone()
+            if not row or row["client_id"] != client_id:
+                return self.oauth_error(400, "invalid_grant", "Invalid refresh token.")
+            if row["used_at"] or row["revoked_at"]:
+                database.execute(
+                    """
+                    UPDATE oauth_tokens SET revoked_at=?
+                    WHERE family_id=? AND revoked_at IS NULL
+                    """,
+                    (now, row["family_id"]),
+                )
+                return self.oauth_error(
+                    400, "invalid_grant", "Refresh token reuse was rejected."
+                )
+            if row["grant_revoked"] or row["expires_at"] <= now:
+                return self.oauth_error(400, "invalid_grant", "Refresh token expired.")
+            try:
+                scopes = (
+                    parse_scopes(form["scope"])
+                    if form.get("scope")
+                    else row["effective_scopes"]
+                )
+            except ValueError:
+                return self.oauth_error(400, "invalid_scope", "Invalid scope.")
+            if not set(scopes.split()).issubset(
+                set(row["effective_scopes"].split())
+            ):
+                return self.oauth_error(400, "invalid_scope", "Scope cannot expand.")
+            database.execute(
+                "UPDATE oauth_tokens SET used_at=? WHERE token_hash=?",
+                (now, row["token_hash"]),
+            )
+            access, refresh = self.issue_oauth_pair(
+                database, row["grant_id"], scopes, row["family_id"]
+            )
+        return self.oauth_token_response(access, refresh, scopes)
+
+    def oauth_token_response(self, access, refresh, scopes):
+        """Return a no-store bearer token response."""
+        return self.json_reply(
+            200,
+            {
+                "access_token": access,
+                "token_type": "Bearer",
+                "expires_in": OAUTH_ACCESS_SECONDS,
+                "refresh_token": refresh,
+                "scope": scopes,
+            },
+            {"Pragma": "no-cache"},
+        )
+
+    def oauth_revoke(self):
+        """Revoke the grant associated with a supplied access or refresh token."""
+        try:
+            form = self.read_form()
+        except ValueError:
+            return self.oauth_error(400, "invalid_request", "Invalid revocation request.")
+        raw_token = form.get("token", "")
+        client_id = form.get("client_id", "")
+        with connect() as database:
+            row = database.execute(
+                """
+                SELECT t.grant_id, g.client_id FROM oauth_tokens t
+                JOIN oauth_grants g ON g.id=t.grant_id
+                WHERE t.token_hash=?
+                """,
+                (token_hash(raw_token),),
+            ).fetchone()
+            if row and row["client_id"] == client_id:
+                now = int(time.time())
+                database.execute(
+                    "UPDATE oauth_grants SET revoked_at=? WHERE id=?", (now, row["grant_id"])
+                )
+                database.execute(
+                    "UPDATE oauth_tokens SET revoked_at=? WHERE grant_id=?", (now, row["grant_id"])
+                )
+        return self.reply(200, b"", "application/json; charset=utf-8")
+
+    def get_integrations(self, session):
+        """List connected OAuth grants for only the signed-in account."""
+        with connect() as database:
+            rows = database.execute(
+                """
+                SELECT g.id, c.client_name, g.scopes, g.created_at,
+                       g.last_used_at
+                FROM oauth_grants g
+                JOIN oauth_clients c ON c.client_id=g.client_id
+                WHERE g.user_id=? AND g.revoked_at IS NULL
+                ORDER BY g.created_at DESC, g.id DESC
+                """,
+                (session["id"],),
+            ).fetchall()
+        return self.json_reply(
+            200,
+            {
+                "integrations": [
+                    {
+                        "id": row["id"],
+                        "clientName": row["client_name"],
+                        "scopes": row["scopes"].split(),
+                        "createdAt": row["created_at"],
+                        "lastUsedAt": row["last_used_at"],
+                    }
+                    for row in rows
+                ]
+            },
+        )
+
+    def revoke_integration(self, path, session):
+        """Revoke one connected client and all its tokens for the owner."""
+        try:
+            grant_id = int(path.rsplit("/", 1)[1])
+        except (ValueError, IndexError):
+            return self.json_reply(400, {"error": "Invalid integration."})
+        now = int(time.time())
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            result = database.execute(
+                """
+                UPDATE oauth_grants SET revoked_at=?
+                WHERE id=? AND user_id=? AND revoked_at IS NULL
+                """,
+                (now, grant_id, session["id"]),
+            )
+            if result.rowcount == 1:
+                database.execute(
+                    "UPDATE oauth_tokens SET revoked_at=? WHERE grant_id=?",
+                    (now, grant_id),
+                )
+        if result.rowcount != 1:
+            return self.json_reply(404, {"error": "Integration not found."})
+        return self.json_reply(200, {"ok": True, "integrationId": grant_id})
+
+    def mcp_readiness(self):
+        """Report only whether the internal MCP process is accepting HTTP."""
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", MCP_INTERNAL_PORT, timeout=1
+            )
+            connection.request("GET", "/healthz")
+            ready = connection.getresponse().status in {200, 400, 401, 404, 405}
+            connection.close()
+        except OSError:
+            ready = False
+        return self.json_reply(200 if ready else 503, {"ready": ready})
+
+    def proxy_mcp(self):
+        """Authenticate, rate-limit, and relay MCP without forwarding cookies."""
+        authorization = self.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            return self.json_reply(
+                401,
+                {"error": "Bearer authentication is required."},
+                {
+                    "WWW-Authenticate": (
+                        'Bearer resource_metadata="'
+                        + PUBLIC_BASE_URL
+                        + '/.well-known/oauth-protected-resource/mcp"'
+                    )
+                },
+            )
+        raw_token = authorization[7:]
+        identity = resolve_access_token(raw_token, touch=True)
+        if not identity:
+            return self.json_reply(401, {"error": "Invalid or expired bearer token."})
+        now = int(time.time())
+        digest = token_hash(raw_token)
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            row = database.execute(
+                "SELECT * FROM mcp_rate_limits WHERE token_hash=?", (digest,)
+            ).fetchone()
+            count = row["request_count"] + 1 if row and row["window_started"] > now - 60 else 1
+            started = row["window_started"] if row and row["window_started"] > now - 60 else now
+            database.execute(
+                """
+                INSERT INTO mcp_rate_limits
+                    (token_hash, window_started, request_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(token_hash) DO UPDATE SET
+                    window_started=excluded.window_started,
+                    request_count=excluded.request_count
+                """,
+                (digest, started, count),
+            )
+        if count > 120:
+            return self.json_reply(
+                429, {"error": "MCP request limit exceeded."}, {"Retry-After": "60"}
+            )
+        body = b""
+        if self.command in {"POST", "PUT", "PATCH"}:
+            try:
+                body = self.read_body(MAX_BYTES)
+            except ValueError:
+                return self.json_reply(413, {"error": "MCP request is too large."})
+        forwarded = {}
+        for name in (
+            "Authorization", "Accept", "Content-Type", "MCP-Protocol-Version",
+            "Mcp-Session-Id", "Last-Event-ID",
+        ):
+            value = self.headers.get(name)
+            if value:
+                forwarded[name] = value
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", MCP_INTERNAL_PORT, timeout=310
+            )
+            connection.request(self.command, "/mcp", body=body, headers=forwarded)
+            response = connection.getresponse()
+            response_body = response.read(MAX_BYTES + 1)
+            if len(response_body) > MAX_BYTES:
+                connection.close()
+                return self.json_reply(502, {"error": "MCP response is too large."})
+            response_headers = []
+            for name in (
+                "Mcp-Session-Id", "MCP-Protocol-Version",
+                "WWW-Authenticate",
+            ):
+                value = response.getheader(name)
+                if value:
+                    response_headers.append((name, value))
+            status = response.status
+            content_type = response.getheader(
+                "Content-Type", "application/json; charset=utf-8"
+            )
+            connection.close()
+            return self.reply(
+                status, response_body, content_type, response_headers
+            )
+        except OSError:
+            return self.json_reply(503, {"error": "MCP service is not ready."})
 
     def login_client_address(self):
         """Return a safe login source, honoring Cloudflare only from trusted peers."""
@@ -823,6 +1824,62 @@ class Handler(BaseHTTPRequestHandler):
         """Hash a request purpose and safe client address for bounded throttling."""
         value = purpose + "\0" + self.login_client_address()
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def cleanup_expired_oauth_records(self, database, now):
+        """Remove expired transient records and unclaimed public clients safely."""
+        database.execute("DELETE FROM oauth_flows WHERE expires_at<=?", (now,))
+        database.execute("DELETE FROM oauth_codes WHERE expires_at<=?", (now,))
+        database.execute(
+            """
+            DELETE FROM oauth_clients
+            WHERE created_at<=?
+              AND NOT EXISTS (
+                  SELECT 1 FROM oauth_grants
+                  WHERE oauth_grants.client_id=oauth_clients.client_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM oauth_codes
+                  WHERE oauth_codes.client_id=oauth_clients.client_id
+              )
+            """,
+            (now - OAUTH_CLIENT_TTL_SECONDS,),
+        )
+
+    def reserve_oauth_source(self, database, purpose, now, limit):
+        """Atomically reserve one public OAuth write without unbounded source rows."""
+        database.execute("BEGIN IMMEDIATE")
+        database.execute(
+            "DELETE FROM oauth_source_limits WHERE window_started<=?",
+            (now - OAUTH_PUBLIC_WINDOW_SECONDS,),
+        )
+        scope = self.attempt_scope("oauth-" + purpose)
+        row = database.execute(
+            """
+            SELECT window_started, request_count FROM oauth_source_limits
+            WHERE scope_hash=? AND purpose=?
+            """,
+            (scope, purpose),
+        ).fetchone()
+        if row and row["request_count"] >= limit:
+            retry_after = row["window_started"] + OAUTH_PUBLIC_WINDOW_SECONDS - now
+            return False, max(1, retry_after)
+        if not row:
+            stored = database.execute(
+                "SELECT COUNT(*) FROM oauth_source_limits"
+            ).fetchone()[0]
+            if stored >= OAUTH_SOURCE_LIMIT:
+                return False, OAUTH_PUBLIC_WINDOW_SECONDS
+        database.execute(
+            """
+            INSERT INTO oauth_source_limits
+                (scope_hash, purpose, window_started, request_count)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(scope_hash, purpose) DO UPDATE SET
+                request_count=oauth_source_limits.request_count+1
+            """,
+            (scope, purpose, now),
+        )
+        return True, 0
 
     def attempt_blocked(self, database, scope, now):
         """Return remaining block seconds, clearing an expired attempt window."""
@@ -1279,6 +2336,20 @@ class Handler(BaseHTTPRequestHandler):
                 database.execute(
                     "DELETE FROM sessions WHERE user_id=?", (session["id"],)
                 )
+                now = int(time.time())
+                database.execute(
+                    "UPDATE oauth_grants SET revoked_at=? WHERE user_id=?",
+                    (now, session["id"]),
+                )
+                database.execute(
+                    """
+                    UPDATE oauth_tokens SET revoked_at=?
+                    WHERE grant_id IN (
+                        SELECT id FROM oauth_grants WHERE user_id=?
+                    )
+                    """,
+                    (now, session["id"]),
+                )
         if new_password is not None:
             return self.json_reply(
                 200,
@@ -1418,6 +2489,8 @@ class Handler(BaseHTTPRequestHandler):
                     database.execute(
                         "DELETE FROM sessions WHERE user_id=?", (user_id,)
                     )
+            if action in {"disable", "archive"} or (action == "legacy" and not legacy_active):
+                revoke_user_oauth(database, user_id, now)
             updated = database.execute(
                 "SELECT * FROM users WHERE id=?", (user_id,)
             ).fetchone()
