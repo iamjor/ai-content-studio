@@ -39,6 +39,10 @@ OAUTH_SOURCE_LIMIT = 4_096
 OAUTH_CLIENT_LIMIT = max(1, int(os.environ.get("AICS_OAUTH_CLIENT_LIMIT", "1000")))
 OAUTH_FLOW_LIMIT = max(1, int(os.environ.get("AICS_OAUTH_FLOW_LIMIT", "5000")))
 OAUTH_CLIENT_TTL_SECONDS = 30 * 24 * 60 * 60
+OAUTH_UI_LOCALES_PATTERN = re.compile(
+    r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*"
+    r"(?: [A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)*"
+)
 MCP_INTERNAL_PORT = int(os.environ.get("AICS_MCP_INTERNAL_PORT", "8788"))
 PUBLIC_BASE_URL = os.environ.get(
     "AICS_PUBLIC_BASE_URL", "http://127.0.0.1:8787"
@@ -1182,7 +1186,7 @@ class Handler(BaseHTTPRequestHandler):
         """Validate an authorization request and return normalized saved fields."""
         allowed = {
             "response_type", "client_id", "redirect_uri", "scope", "state",
-            "code_challenge", "code_challenge_method", "resource",
+            "code_challenge", "code_challenge_method", "resource", "ui_locales",
         }
         if set(values) - allowed or values.get("response_type") != "code":
             raise ValueError("Invalid authorization request")
@@ -1191,9 +1195,18 @@ class Handler(BaseHTTPRequestHandler):
         state = values.get("state", "")
         challenge = values.get("code_challenge", "")
         resource = values.get("resource", PUBLIC_BASE_URL + "/mcp")
+        ui_locales = values.get("ui_locales")
         if (
             not isinstance(state, str)
             or len(state) > 512
+            or (
+                ui_locales is not None
+                and (
+                    not isinstance(ui_locales, str)
+                    or len(ui_locales) > 128
+                    or not OAUTH_UI_LOCALES_PATTERN.fullmatch(ui_locales)
+                )
+            )
             or values.get("code_challenge_method") != "S256"
             or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", challenge)
             or resource != PUBLIC_BASE_URL + "/mcp"
@@ -1207,6 +1220,8 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
         if not client or redirect_uri not in json.loads(client["redirect_uris"]):
             raise ValueError("Invalid client or redirect URI")
+        # ChatGPT sends ui_locales only as a display hint. Validate it above,
+        # then omit it here so it never enters flow, code, grant, or token data.
         return {
             "client_id": client_id,
             "client_name": client["client_name"],
