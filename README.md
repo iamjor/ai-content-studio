@@ -64,9 +64,11 @@ Open `http://127.0.0.1:8787`. Never use `AICS_COOKIE_SECURE=0` for a publicly re
 
 ## Security defaults and limitations
 
-Registration starts disabled and can create regular users only. Passwords use salted PBKDF2-SHA256 records. Sessions are server-side, fixed-lifetime, and sent in HttpOnly, SameSite Strict cookies that are Secure by default. State changes require a session CSRF token and same-origin context. Login and enabled registration have bounded, source-based throttles. Forwarded client addresses are accepted only from explicitly trusted proxy networks. Compose exposes the service on loopback only.
+Registration starts disabled and can create regular users only. Passwords use salted PBKDF2-SHA256 records. Sessions are server-side, fixed-lifetime, and sent in HttpOnly, SameSite Strict cookies that are Secure by default. State changes require a session CSRF token and same-origin context. Login, enabled account registration, public OAuth client registration, and OAuth authorization-flow creation have bounded, source-based throttles. Forwarded client addresses are accepted only from explicitly trusted proxy networks. Compose exposes the service on loopback only.
 
 Remote MCP clients discover OAuth metadata on the same origin and use authorization code plus S256 PKCE. Access and refresh tokens are random and stored only as hashes. Browser cookies are not accepted as MCP credentials. Users can review and revoke integrations from Account. Private image upload and deletion remain browser-only.
+
+Public OAuth client registrations are capped and unclaimed registrations expire after 30 days. Compose health checks both `/healthz` and `/mcp/ready`, so a stopped MCP worker makes the container unhealthy for operator monitoring or orchestration.
 
 The project does not provide email verification, password-reset email, MFA, external identity, or an audit log. JSON export is text-only and excludes images. A complete backup must preserve both SQLite and `/data/images`. Report vulnerabilities through the private process in [Security](docs/SECURITY.md).
 

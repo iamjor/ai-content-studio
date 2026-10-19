@@ -10,6 +10,7 @@
 - Added account-scoped read, planning update, prompt, gate, archive, restore, and separately confirmed permanent-delete tools with optimistic workspace revision conflicts.
 - Added bounded tool schemas, structured errors, request limiting, precise deletion receipts, and MCP safety annotations.
 - Added additive schema version 5 tables for OAuth clients, flows, codes, grants, hashed tokens, and MCP rate limits.
+- Added proxy-safe OAuth public-write limits, a bounded expiring client policy, per-token effective scopes, and MCP-aware container health.
 - Added OAuth, transport, scope, expiry, isolation, migration, conflict, preservation, limit, and deletion tests.
 - Prepared release and upgrade documentation without creating a tag, GitHub Release, OAuth client, or deployment.
 

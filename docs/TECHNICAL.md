@@ -65,7 +65,7 @@ Passwords are limited to 12 through 256 characters and stored using salted PBKDF
 
 ## 12. Configuration
 
-Documented variables are `AICS_ADMIN_USERNAME`, `AICS_ADMIN_DISPLAY_NAME`, `AICS_ADMIN_PASSWORD`, `AICS_REGISTRATION_ENABLED`, `AICS_MAX_USERS`, `AICS_REGISTRATION_ATTEMPT_LIMIT`, `AICS_COOKIE_SECURE`, `AICS_SESSION_HOURS`, `AICS_TRUSTED_PROXY_NETWORKS`, `AICS_IMAGE_ROOT`, `AICS_PUBLIC_BASE_URL`, and `AICS_MCP_INTERNAL_PORT`. The container also sets `AICS_DB_PATH=/data/studio.sqlite3` and `PORT=8787`. Legacy `AICS_USERNAME` and `AICS_PASSWORD` remain bootstrap fallbacks for upgrade compatibility.
+Documented variables are `AICS_ADMIN_USERNAME`, `AICS_ADMIN_DISPLAY_NAME`, `AICS_ADMIN_PASSWORD`, `AICS_REGISTRATION_ENABLED`, `AICS_MAX_USERS`, `AICS_REGISTRATION_ATTEMPT_LIMIT`, `AICS_OAUTH_CLIENT_LIMIT`, `AICS_OAUTH_FLOW_LIMIT`, `AICS_COOKIE_SECURE`, `AICS_SESSION_HOURS`, `AICS_TRUSTED_PROXY_NETWORKS`, `AICS_IMAGE_ROOT`, `AICS_PUBLIC_BASE_URL`, and `AICS_MCP_INTERNAL_PORT`. The container also sets `AICS_DB_PATH=/data/studio.sqlite3` and `PORT=8787`. Legacy `AICS_USERNAME` and `AICS_PASSWORD` remain bootstrap fallbacks for upgrade compatibility.
 
 Secrets belong in an untracked `.env` or an operator-managed secret mechanism. Bootstrap credentials should be removed after the initial administrator exists.
 
@@ -75,7 +75,7 @@ Development may run natively with a temporary SQLite path and insecure local coo
 
 ## 14. Delivery behavior
 
-The service returns static assets and API responses with `Cache-Control: no-store`, content-type sniffing protection, same-origin referrer and opener policy, a restrictive permissions policy, and a self-only content security policy. HSTS is returned when Secure cookies are enabled. `/healthz` is the container health endpoint and `/mcp/ready` reports only loopback MCP worker readiness. The application version comes from `APP_VERSION` and is delivered through `/api/session` for both authenticated and signed-out footers.
+The service returns static assets and API responses with `Cache-Control: no-store`, content-type sniffing protection, same-origin referrer and opener policy, a restrictive permissions policy, and a self-only content security policy. HSTS is returned when Secure cookies are enabled. Compose checks both `/healthz` and `/mcp/ready`, so either a stopped web process or an unreachable loopback MCP worker makes the container unhealthy. The application version comes from `APP_VERSION` and is delivered through `/api/session` for both authenticated and signed-out footers.
 
 ## 15. Stable links and assets
 
@@ -103,11 +103,11 @@ Security reporting guidance is in [SECURITY.md](SECURITY.md). Installation-speci
 
 ## 20. OAuth and MCP endpoint contract
 
-The public Streamable HTTP endpoint is `/mcp` on the exact origin configured by `AICS_PUBLIC_BASE_URL`. OAuth authorization-server metadata is at `/.well-known/oauth-authorization-server`; RFC 9728 protected-resource metadata is at `/.well-known/oauth-protected-resource/mcp`. Dynamic registration accepts public clients with exact HTTPS redirect URIs or HTTP loopback redirects. Authorization code is the only interactive grant, PKCE S256 is mandatory, and access tokens target the exact MCP resource.
+The public Streamable HTTP endpoint is `/mcp` on the exact origin configured by `AICS_PUBLIC_BASE_URL`. OAuth authorization-server metadata is at `/.well-known/oauth-authorization-server`; RFC 9728 protected-resource metadata is at `/.well-known/oauth-protected-resource/mcp`. Dynamic registration accepts public clients with exact HTTPS redirect URIs or HTTP loopback redirects. Public registration and authorization-flow creation use proxy-safe per-source limits with bounded durable state. Unclaimed client registrations expire after 30 days, and expired flows and codes are cleaned transactionally. Total clients are capped by `AICS_OAUTH_CLIENT_LIMIT`, which defaults to 1000, and live consent flows are capped by `AICS_OAUTH_FLOW_LIMIT`, which defaults to 5000. Authorization code is the only interactive grant, PKCE S256 is mandatory, and access tokens target the exact MCP resource.
 
 Access tokens live for one hour. Refresh tokens live for 30 days, rotate on every use, and revoke their family on replay. The database stores only SHA-256 hashes of high-entropy token values. `aics.read` and `aics.write` are enforced for each tool. Every token resolves one active, non-archived AICS account; administrator role does not widen record access. Password change and Account revocation invalidate grants. Ordinary browser logout ends the browser session but intentionally leaves separately consented integrations visible and revocable in Account.
 
-The official MCP SDK worker listens only on configurable loopback port `AICS_MCP_INTERNAL_PORT`. The public server validates and rate-limits the bearer token, forwards an allowlist of protocol headers without cookies, and caps request and response bodies. Browser session, CSRF, Origin, Host, proxy, and cookie controls remain separate and unchanged.
+The official MCP SDK worker listens only on configurable loopback port `AICS_MCP_INTERNAL_PORT`. The public server validates and rate-limits the bearer token, forwards an allowlist of protocol headers without cookies, and caps request and response bodies. Effective scopes are persisted on each access and refresh token, so refresh-token narrowing cannot regain a broader grant scope. Browser session, CSRF, Origin, Host, proxy, and cookie controls remain separate and unchanged.
 
 Read tools are `get_workspace_summary`, `list_projects`, `get_project`, `get_project_bible`, `list_episodes`, `get_episode`, `list_characters`, `get_character`, `list_prompts`, and `list_production_gates`. Planning writes are `update_project_bible`, `update_episode_planning`, `replace_episode_shots`, `update_character_planning`, `upsert_project_prompt`, and `update_production_gates`. `archive_content_record` and `restore_content_record` support projects, episodes, characters, and prompts. Separate destructive tools are `delete_project`, `delete_episode`, `delete_character`, `delete_project_prompt`, `delete_episode_shot`, and `delete_production_gate`.
 

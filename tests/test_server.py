@@ -273,6 +273,29 @@ class LoginThrottleUnitTests(unittest.TestCase):
             self.assertEqual(handler.login_client_address(), "203.0.113.25")
 
 
+class McpReadinessUnitTests(unittest.TestCase):
+    """Verify container health can detect a stopped private MCP worker."""
+
+    def test_readiness_fails_when_mcp_worker_is_unreachable(self):
+        """Return 503 when the loopback MCP child process cannot be contacted."""
+        handler = object.__new__(server.Handler)
+        handler.json_reply = unittest.mock.Mock(return_value="unhealthy")
+        with unittest.mock.patch.object(
+            server.http.client,
+            "HTTPConnection",
+            side_effect=ConnectionRefusedError,
+        ):
+            result = handler.mcp_readiness()
+        self.assertEqual(result, "unhealthy")
+        handler.json_reply.assert_called_once_with(503, {"ready": False})
+
+    def test_compose_health_checks_web_and_mcp_readiness(self):
+        """Keep both public web and private worker readiness in Compose health."""
+        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+        self.assertIn("http://127.0.0.1:8787/healthz", compose)
+        self.assertIn("http://127.0.0.1:8787/mcp/ready", compose)
+
+
 class WorkspacePlanningMigrationTests(unittest.TestCase):
     """Verify v0.2 defaults preserve owner-entered legacy planning records."""
 
@@ -319,6 +342,72 @@ class WorkspacePlanningMigrationTests(unittest.TestCase):
 
         _, changed_again = server.normalize_workspace_data(migrated)
         self.assertFalse(changed_again)
+
+    def test_oauth_token_scope_column_migrates_without_losing_rows(self):
+        """Add per-token scopes to an existing schema while retaining token records."""
+        with tempfile.TemporaryDirectory(prefix="aics-scope-migration-") as directory:
+            database_path = Path(directory) / "migration.sqlite3"
+            raw_token = "migration-access-" + secrets.token_urlsafe(40)
+            with unittest.mock.patch.multiple(
+                server,
+                DB_PATH=database_path,
+                ADMIN_USERNAME=ADMIN_USERNAME,
+                ADMIN_PASSWORD=ADMIN_PASSWORD,
+                ADMIN_DISPLAY_NAME="Studio Owner",
+            ):
+                server.setup()
+                with sqlite3.connect(database_path) as database:
+                    user_id = database.execute(
+                        "SELECT id FROM users WHERE role='admin'"
+                    ).fetchone()[0]
+                    now = int(time.time())
+                    database.execute(
+                        """
+                        INSERT INTO oauth_clients
+                            (client_id, client_name, redirect_uris, created_at)
+                        VALUES ('migration-client', 'Migration test', '[]', ?)
+                        """,
+                        (now,),
+                    )
+                    grant_id = database.execute(
+                        """
+                        INSERT INTO oauth_grants
+                            (user_id, client_id, scopes, created_at)
+                        VALUES (?, 'migration-client',
+                                'aics.read aics.write', ?)
+                        """,
+                        (user_id, now),
+                    ).lastrowid
+                    database.execute(
+                        """
+                        INSERT INTO oauth_tokens
+                            (token_hash, grant_id, token_type, family_id,
+                             created_at, expires_at, scopes)
+                        VALUES (?, ?, 'access', 'migration-family', ?, ?,
+                                'aics.read aics.write')
+                        """,
+                        (
+                            server.token_hash(raw_token), grant_id,
+                            now, now + 3600,
+                        ),
+                    )
+                    database.execute("ALTER TABLE oauth_tokens DROP COLUMN scopes")
+                server.setup()
+                with sqlite3.connect(database_path) as database:
+                    columns = {
+                        row[1]
+                        for row in database.execute(
+                            "PRAGMA table_info(oauth_tokens)"
+                        )
+                    }
+                    token_count = database.execute(
+                        "SELECT COUNT(*) FROM oauth_tokens"
+                    ).fetchone()[0]
+                self.assertIn("scopes", columns)
+                self.assertEqual(token_count, 1)
+                self.assertIsNotNone(
+                    server.resolve_access_token(raw_token, "aics.write")
+                )
 
 
 class ServerIntegrationTests(unittest.TestCase):
@@ -373,6 +462,8 @@ class ServerIntegrationTests(unittest.TestCase):
                 "AICS_REGISTRATION_ENABLED": "0",
                 "AICS_MAX_USERS": "8",
                 "AICS_REGISTRATION_ATTEMPT_LIMIT": "5",
+                "AICS_OAUTH_CLIENT_LIMIT": "12",
+                "AICS_OAUTH_FLOW_LIMIT": "4",
                 "AICS_TRUSTED_PROXY_NETWORKS": "127.0.0.1/32",
                 "AICS_SESSION_HOURS": "12",
                 "AICS_PUBLIC_BASE_URL": cls.base_url,
@@ -390,11 +481,13 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         for _ in range(80):
             try:
-                status, _, _ = TestClient(cls.base_url).request("/healthz")
-                if status == 200:
+                web_status, _, _ = TestClient(cls.base_url).request("/healthz")
+                mcp_status, _, _ = TestClient(cls.base_url).request("/mcp/ready")
+                if web_status == 200 and mcp_status == 200:
                     return
             except OSError:
-                time.sleep(0.1)
+                pass
+            time.sleep(0.1)
         cls.stop_server()
         raise RuntimeError("test server did not start")
 
@@ -444,6 +537,9 @@ class ServerIntegrationTests(unittest.TestCase):
         status, health, _ = client.request("/healthz")
         self.assertEqual(status, 200)
         self.assertEqual(health, {"ok": True})
+        status, ready, _ = client.request("/mcp/ready")
+        self.assertEqual(status, 200)
+        self.assertEqual(ready, {"ready": True})
 
         status, html, headers = client.request("/")
         self.assertEqual(status, 200)
@@ -1195,10 +1291,66 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         redirect_uri = self.base_url + "/oauth-test-callback"
         registration = dict(invalid, client_name="MCP test", redirect_uris=[redirect_uri])
+        now = int(time.time())
+        registration_scope = server.hashlib.sha256(
+            b"oauth-registration\x00127.0.0.1"
+        ).hexdigest()
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO oauth_source_limits
+                    (scope_hash, purpose, window_started, request_count)
+                VALUES (?, 'registration', ?, ?)
+                """,
+                (registration_scope, now, server.OAUTH_REGISTRATION_LIMIT),
+            )
+            clients_before = database.execute(
+                "SELECT COUNT(*) FROM oauth_clients"
+            ).fetchone()[0]
+        status, _, headers = client.request(
+            "/oauth/register", method="POST", payload=registration
+        )
+        self.assertEqual(status, 429)
+        self.assertIsNotNone(headers.get("Retry-After"))
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_clients").fetchone()[0],
+                clients_before,
+            )
+            database.execute(
+                "DELETE FROM oauth_source_limits WHERE purpose='registration'"
+            )
+            database.execute(
+                """
+                INSERT INTO oauth_clients
+                    (client_id, client_name, redirect_uris, created_at)
+                VALUES ('expired-client', 'Expired', '[]', ?)
+                """,
+                (now - server.OAUTH_CLIENT_TTL_SECONDS - 1,),
+            )
+            database.execute(
+                """
+                INSERT INTO oauth_flows
+                    (flow_hash, request_data, created_at, expires_at)
+                VALUES ('expired-flow', '{}', ?, ?)
+                """,
+                (now - 10, now - 1),
+            )
         status, registered, _ = client.request(
             "/oauth/register", method="POST", payload=registration
         )
         self.assertEqual(status, 201, registered)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertIsNone(
+                database.execute(
+                    "SELECT 1 FROM oauth_clients WHERE client_id='expired-client'"
+                ).fetchone()
+            )
+            self.assertIsNone(
+                database.execute(
+                    "SELECT 1 FROM oauth_flows WHERE flow_hash='expired-flow'"
+                ).fetchone()
+            )
 
         admin = self.admin_client()
         verifier = "v" * 48
@@ -1215,6 +1367,32 @@ class ServerIntegrationTests(unittest.TestCase):
                 "resource": self.base_url + "/mcp",
             }
         )
+        authorization_scope = server.hashlib.sha256(
+            b"oauth-authorization\x00127.0.0.1"
+        ).hexdigest()
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO oauth_source_limits
+                    (scope_hash, purpose, window_started, request_count)
+                VALUES (?, 'authorization', ?, ?)
+                """,
+                (authorization_scope, now, server.OAUTH_AUTHORIZATION_LIMIT),
+            )
+            flows_before = database.execute(
+                "SELECT COUNT(*) FROM oauth_flows"
+            ).fetchone()[0]
+        status, _, headers = admin.request("/oauth/authorize?" + query)
+        self.assertEqual(status, 429)
+        self.assertIsNotNone(headers.get("Retry-After"))
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_flows").fetchone()[0],
+                flows_before,
+            )
+            database.execute(
+                "DELETE FROM oauth_source_limits WHERE purpose='authorization'"
+            )
         status, page, headers = admin.request("/oauth/authorize?" + query)
         self.assertEqual(status, 200, page)
         flow = page.split('name="flow" value="', 1)[1].split('"', 1)[0]
@@ -1310,10 +1488,19 @@ class ServerIntegrationTests(unittest.TestCase):
                 "grant_type": "refresh_token",
                 "client_id": registered["client_id"],
                 "refresh_token": tokens["refresh_token"],
+                "scope": "aics.read",
             },
         )
         self.assertEqual(status, 200, rotated)
+        self.assertEqual(rotated["scope"], "aics.read")
         self.assertNotEqual(rotated["refresh_token"], tokens["refresh_token"])
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            self.assertIsNotNone(
+                server.resolve_access_token(rotated["access_token"], "aics.read")
+            )
+            self.assertIsNone(
+                server.resolve_access_token(rotated["access_token"], "aics.write")
+            )
         self.assertEqual(
             form_post(
                 "/oauth/token",
@@ -1336,6 +1523,229 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertIsNone(
                 server.resolve_access_token(rotated["access_token"])
             )
+        with sqlite3.connect(self.database_path) as database:
+            for index in range(4):
+                database.execute(
+                    """
+                    INSERT INTO oauth_flows
+                        (flow_hash, request_data, created_at, expires_at)
+                    VALUES (?, '{}', ?, ?)
+                    """,
+                    ("capacity-flow-" + str(index), now, now + 300),
+                )
+            flows_before = database.execute(
+                "SELECT COUNT(*) FROM oauth_flows"
+            ).fetchone()[0]
+        status, payload, _ = admin.request("/oauth/authorize?" + query)
+        self.assertEqual(status, 503, payload)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_flows").fetchone()[0],
+                flows_before,
+            )
+        with sqlite3.connect(self.database_path) as database:
+            client_count = database.execute(
+                "SELECT COUNT(*) FROM oauth_clients"
+            ).fetchone()[0]
+            for index in range(12 - client_count):
+                database.execute(
+                    """
+                    INSERT INTO oauth_clients
+                        (client_id, client_name, redirect_uris, created_at)
+                    VALUES (?, 'Capacity test', '[]', ?)
+                    """,
+                    ("capacity-client-" + str(index), int(time.time())),
+                )
+            clients_before = database.execute(
+                "SELECT COUNT(*) FROM oauth_clients"
+            ).fetchone()[0]
+        status, payload, _ = client.request(
+            "/oauth/register", method="POST", payload=registration
+        )
+        self.assertEqual(status, 503, payload)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_clients").fetchone()[0],
+                clients_before,
+            )
+
+    def test_19a_read_only_refresh_token_rejects_every_mcp_mutation(self):
+        """Keep a narrowed refresh token read-only through the actual MCP transport."""
+        admin = self.admin_client()
+        revision_before = admin.request("/api/workspace")[1]["revision"]
+        now = int(time.time())
+        client_id = "read-only-refresh-client"
+        raw_refresh = "test-refresh-" + secrets.token_urlsafe(40)
+        with sqlite3.connect(self.database_path) as database:
+            user_id = database.execute(
+                "SELECT id FROM users WHERE username=?", (ADMIN_USERNAME,)
+            ).fetchone()[0]
+            database.execute(
+                """
+                INSERT OR REPLACE INTO oauth_clients
+                    (client_id, client_name, redirect_uris, created_at)
+                VALUES (?, 'Read-only refresh test', '[]', ?)
+                """,
+                (client_id, now),
+            )
+            database.execute(
+                """
+                INSERT OR REPLACE INTO oauth_grants
+                    (id, user_id, client_id, scopes, created_at, revoked_at)
+                VALUES (9002, ?, ?, 'aics.read aics.write', ?, NULL)
+                """,
+                (user_id, client_id, now),
+            )
+            database.execute(
+                """
+                INSERT INTO oauth_tokens
+                    (token_hash, grant_id, token_type, family_id, created_at,
+                     expires_at, scopes)
+                VALUES (?, 9002, 'refresh', 'read-only-family', ?, ?,
+                        'aics.read aics.write')
+                """,
+                (server.token_hash(raw_refresh), now, now + 3600),
+            )
+
+        request = urllib.request.Request(
+            self.base_url + "/oauth/token",
+            data=urllib.parse.urlencode(
+                {
+                    "grant_type": "refresh_token",
+                    "client_id": client_id,
+                    "refresh_token": raw_refresh,
+                    "scope": "aics.read",
+                }
+            ).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            narrowed = json.loads(response.read())
+        self.assertEqual(narrowed["scope"], "aics.read")
+
+        def mcp_request(payload, session_id=None):
+            """Send an authenticated JSON-RPC request with the narrowed token."""
+            headers = {
+                "Authorization": "Bearer " + narrowed["access_token"],
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            if session_id:
+                headers["Mcp-Session-Id"] = session_id
+            rpc = urllib.request.Request(
+                self.base_url + "/mcp",
+                data=json.dumps(payload).encode("utf-8"),
+                method="POST",
+                headers=headers,
+            )
+            with urllib.request.urlopen(rpc, timeout=10) as response:
+                body = response.read()
+                return json.loads(body) if body else {}, response.headers.get(
+                    "Mcp-Session-Id"
+                )
+
+        initialized, session_id = mcp_request(
+            {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "Read-only test", "version": "1"},
+                },
+            }
+        )
+        self.assertIn("result", initialized)
+        mcp_request(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id,
+        )
+        read_result, _ = mcp_request(
+            {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {
+                    "name": "get_workspace_summary",
+                    "arguments": {},
+                },
+            },
+            session_id,
+        )
+        self.assertIn("result", read_result)
+
+        mutation_calls = {
+            "update_project_bible": {
+                "project_id": "blocked", "expected_revision": 0,
+                "changes": {"logline": "Blocked"},
+            },
+            "update_episode_planning": {
+                "project_id": "blocked", "episode_id": "blocked",
+                "expected_revision": 0, "synopsis": "Blocked",
+            },
+            "replace_episode_shots": {
+                "project_id": "blocked", "episode_id": "blocked",
+                "expected_revision": 0, "shots": [],
+            },
+            "update_character_planning": {
+                "project_id": "blocked", "character_id": "blocked",
+                "expected_revision": 0, "reference_requirements": "Blocked",
+            },
+            "upsert_project_prompt": {
+                "project_id": "blocked", "expected_revision": 0,
+                "name": "Blocked", "category": "style", "body": "Blocked",
+            },
+            "update_production_gates": {
+                "project_id": "blocked", "expected_revision": 0,
+                "gates": [{"id": "blocked", "name": "Blocked"}],
+            },
+            "archive_content_record": {
+                "project_id": "blocked", "record_type": "project",
+                "record_id": "blocked", "expected_revision": 0,
+            },
+            "restore_content_record": {
+                "project_id": "blocked", "record_type": "project",
+                "record_id": "blocked", "expected_revision": 0,
+            },
+            "delete_project": {
+                "project_id": "blocked", "expected_revision": 0,
+                "confirmation": "Blocked",
+            },
+            "delete_episode": {
+                "project_id": "blocked", "episode_id": "blocked",
+                "expected_revision": 0, "confirmation": "Blocked",
+            },
+            "delete_character": {
+                "project_id": "blocked", "character_id": "blocked",
+                "expected_revision": 0, "confirmation": "Blocked",
+            },
+            "delete_project_prompt": {
+                "project_id": "blocked", "prompt_id": "blocked",
+                "expected_revision": 0, "confirmation": "Blocked",
+            },
+            "delete_episode_shot": {
+                "project_id": "blocked", "episode_id": "blocked",
+                "shot_id": "blocked", "expected_revision": 0,
+                "confirmation": "Blocked",
+            },
+            "delete_production_gate": {
+                "project_id": "blocked", "gate_id": "blocked",
+                "expected_revision": 0, "confirmation": "Blocked",
+            },
+        }
+        for request_id, (name, arguments) in enumerate(
+            mutation_calls.items(), start=3
+        ):
+            denied, _ = mcp_request(
+                {
+                    "jsonrpc": "2.0", "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+                session_id,
+            )
+            self.assertIn("insufficient_scope", json.dumps(denied), name)
+        self.assertEqual(
+            admin.request("/api/workspace")[1]["revision"], revision_before
+        )
 
     def test_19_mcp_actual_http_transport_and_bounded_tool_catalog(self):
         """Initialize over Streamable HTTP and call representative read and write tools."""

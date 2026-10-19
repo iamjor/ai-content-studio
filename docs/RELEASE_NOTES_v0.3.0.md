@@ -23,7 +23,7 @@ Tools use bounded input schemas and server-side validation. The server rejects u
 
 ## Security and privacy
 
-The MCP worker binds only to loopback. The public service validates bearer tokens, applies a per-token request limit, forwards only protocol headers, and never forwards browser cookies. Browser session, CSRF, Origin, Host, proxy, and cookie protections remain unchanged.
+The MCP worker binds only to loopback. The public service validates bearer tokens, applies a per-token request limit, forwards only protocol headers, and never forwards browser cookies. Public OAuth registration and authorization flows have proxy-safe per-source limits, bounded storage, and safe expiry cleanup. Effective scope is stored per token so a narrowed refresh remains read-only. Compose checks both web and MCP readiness. Browser session, CSRF, Origin, Host, proxy, and cookie protections remain unchanged.
 
 MCP reads never return image bytes, private image URLs, storage paths, passwords, sessions, OAuth secrets, administrator data, or another account's workspace. Direct image upload and image-only deletion remain browser-only. Confirmed character and project deletion also remove associated private images as required. The MCP tool catalog contains no account deletion, administrator, registration, deployment, publishing, shell, arbitrary file or database, AI generation, or paid API tools.
 

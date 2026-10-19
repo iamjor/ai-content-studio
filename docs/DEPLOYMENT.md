@@ -58,7 +58,8 @@ Carry out these steps only on an installation you administer.
 
 ## 5. Production verification
 
-- [ ] Check Compose status and `/healthz`.
+- [ ] Check Compose status, `/healthz`, and `/mcp/ready`.
+- [ ] Confirm stopping the MCP child makes `/mcp/ready` fail and marks the container unhealthy for operator monitoring or orchestration.
 - [ ] Check `/mcp/ready` without expecting it to reveal account or workspace data.
 - [ ] Verify OAuth authorization-server and protected-resource discovery use the configured public HTTPS origin.
 - [ ] Connect a disposable compatible MCP client, approve only required scopes, verify one read and one revision-safe write, then revoke it from Account.

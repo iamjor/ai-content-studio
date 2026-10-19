@@ -32,6 +32,13 @@ OAUTH_CODE_SECONDS = 5 * 60
 OAUTH_ACCESS_SECONDS = 60 * 60
 OAUTH_REFRESH_SECONDS = 30 * 24 * 60 * 60
 OAUTH_SCOPES = {"aics.read", "aics.write"}
+OAUTH_PUBLIC_WINDOW_SECONDS = 60
+OAUTH_REGISTRATION_LIMIT = 10
+OAUTH_AUTHORIZATION_LIMIT = 30
+OAUTH_SOURCE_LIMIT = 4_096
+OAUTH_CLIENT_LIMIT = max(1, int(os.environ.get("AICS_OAUTH_CLIENT_LIMIT", "1000")))
+OAUTH_FLOW_LIMIT = max(1, int(os.environ.get("AICS_OAUTH_FLOW_LIMIT", "5000")))
+OAUTH_CLIENT_TTL_SECONDS = 30 * 24 * 60 * 60
 MCP_INTERNAL_PORT = int(os.environ.get("AICS_MCP_INTERNAL_PORT", "8788"))
 PUBLIC_BASE_URL = os.environ.get(
     "AICS_PUBLIC_BASE_URL", "http://127.0.0.1:8787"
@@ -490,6 +497,7 @@ def setup():
                 family_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
+                scopes TEXT NOT NULL DEFAULT '',
                 used_at INTEGER,
                 revoked_at INTEGER
             );
@@ -500,6 +508,13 @@ def setup():
                 window_started INTEGER NOT NULL,
                 request_count INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS oauth_source_limits (
+                scope_hash TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                window_started INTEGER NOT NULL,
+                request_count INTEGER NOT NULL,
+                PRIMARY KEY(scope_hash, purpose)
+            );
             """
         )
         user_columns = {
@@ -507,6 +522,13 @@ def setup():
         }
         if "archived_at" not in user_columns:
             database.execute("ALTER TABLE users ADD COLUMN archived_at INTEGER")
+        token_columns = {
+            row["name"] for row in database.execute("PRAGMA table_info(oauth_tokens)")
+        }
+        if "scopes" not in token_columns:
+            database.execute(
+                "ALTER TABLE oauth_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"
+            )
         try:
             previous_schema = int(get_setting(database, "schema_version", "0"))
         except ValueError:
@@ -641,7 +663,8 @@ def resolve_access_token(raw_token, required_scope=None, touch=False):
     with connect() as database:
         row = database.execute(
             """
-            SELECT t.token_hash, t.expires_at, g.id AS grant_id, g.scopes,
+            SELECT t.token_hash, t.expires_at, g.id AS grant_id,
+                   COALESCE(NULLIF(t.scopes, ''), g.scopes) AS scopes,
                    g.user_id, c.client_id, c.client_name
             FROM oauth_tokens t
             JOIN oauth_grants g ON g.id=t.grant_id
@@ -1113,14 +1136,35 @@ class Handler(BaseHTTPRequestHandler):
                 400, "invalid_client_metadata", "Provide valid public client metadata."
             )
         client_id = "aics-client-" + secrets.token_urlsafe(24)
+        now = int(time.time())
         with connect() as database:
+            accepted, retry_after = self.reserve_oauth_source(
+                database, "registration", now, OAUTH_REGISTRATION_LIMIT
+            )
+            if not accepted:
+                return self.oauth_error(
+                    429,
+                    "slow_down",
+                    "Too many client registration requests.",
+                    {"Retry-After": str(retry_after)},
+                )
+            self.cleanup_expired_oauth_records(database, now)
+            client_count = database.execute(
+                "SELECT COUNT(*) FROM oauth_clients"
+            ).fetchone()[0]
+            if client_count >= OAUTH_CLIENT_LIMIT:
+                return self.oauth_error(
+                    503,
+                    "temporarily_unavailable",
+                    "The public client registration limit has been reached.",
+                )
             database.execute(
                 """
                 INSERT INTO oauth_clients
                     (client_id, client_name, redirect_uris, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (client_id, name, json.dumps(redirect_uris), int(time.time())),
+                (client_id, name, json.dumps(redirect_uris), now),
             )
         return self.json_reply(
             201,
@@ -1198,6 +1242,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def oauth_authorize_page(self):
         """Validate an OAuth request and render account login plus explicit consent."""
+        now = int(time.time())
+        with connect() as database:
+            self.cleanup_expired_oauth_records(database, now)
         try:
             query = parse_qs(
                 urlsplit(self.path).query,
@@ -1214,11 +1261,27 @@ class Handler(BaseHTTPRequestHandler):
                 400, "invalid_request", "The authorization request is invalid."
             )
         raw_flow = secrets.token_urlsafe(32)
-        now = int(time.time())
         with connect() as database:
-            database.execute(
-                "DELETE FROM oauth_flows WHERE expires_at<=?", (now,)
+            accepted, retry_after = self.reserve_oauth_source(
+                database, "authorization", now, OAUTH_AUTHORIZATION_LIMIT
             )
+            if not accepted:
+                return self.oauth_error(
+                    429,
+                    "slow_down",
+                    "Too many authorization requests.",
+                    {"Retry-After": str(retry_after)},
+                )
+            self.cleanup_expired_oauth_records(database, now)
+            flow_count = database.execute(
+                "SELECT COUNT(*) FROM oauth_flows"
+            ).fetchone()[0]
+            if flow_count >= OAUTH_FLOW_LIMIT:
+                return self.oauth_error(
+                    503,
+                    "temporarily_unavailable",
+                    "The active authorization request limit has been reached.",
+                )
             database.execute(
                 """
                 INSERT INTO oauth_flows
@@ -1392,7 +1455,7 @@ class Handler(BaseHTTPRequestHandler):
             [("Set-Cookie", self.oauth_flow_cookie("", 0))],
         )
 
-    def issue_oauth_pair(self, database, grant_id, family_id=None):
+    def issue_oauth_pair(self, database, grant_id, scopes, family_id=None):
         """Create one short access token and one rotating refresh token."""
         now = int(time.time())
         family_id = family_id or secrets.token_hex(24)
@@ -1401,17 +1464,17 @@ class Handler(BaseHTTPRequestHandler):
         database.executemany(
             """
             INSERT INTO oauth_tokens
-                (token_hash, grant_id, token_type, family_id, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (token_hash, grant_id, token_type, family_id, created_at, expires_at, scopes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 (
                     token_hash(access), grant_id, "access", family_id,
-                    now, now + OAUTH_ACCESS_SECONDS,
+                    now, now + OAUTH_ACCESS_SECONDS, scopes,
                 ),
                 (
                     token_hash(refresh), grant_id, "refresh", family_id,
-                    now, now + OAUTH_REFRESH_SECONDS,
+                    now, now + OAUTH_REFRESH_SECONDS, scopes,
                 ),
             ),
         )
@@ -1488,7 +1551,9 @@ class Handler(BaseHTTPRequestHandler):
                 "UPDATE oauth_tokens SET revoked_at=? WHERE grant_id=? AND revoked_at IS NULL",
                 (now, grant["id"]),
             )
-            access, refresh = self.issue_oauth_pair(database, grant["id"])
+            access, refresh = self.issue_oauth_pair(
+                database, grant["id"], row["scopes"]
+            )
         return self.oauth_token_response(access, refresh, row["scopes"])
 
     def oauth_refresh_token(self, form):
@@ -1500,7 +1565,9 @@ class Handler(BaseHTTPRequestHandler):
             database.execute("BEGIN IMMEDIATE")
             row = database.execute(
                 """
-                SELECT t.*, g.scopes, g.client_id, g.revoked_at AS grant_revoked
+                SELECT t.*,
+                       COALESCE(NULLIF(t.scopes, ''), g.scopes) AS effective_scopes,
+                       g.client_id, g.revoked_at AS grant_revoked
                 FROM oauth_tokens t
                 JOIN oauth_grants g ON g.id=t.grant_id
                 WHERE t.token_hash=? AND t.token_type='refresh'
@@ -1526,18 +1593,20 @@ class Handler(BaseHTTPRequestHandler):
                 scopes = (
                     parse_scopes(form["scope"])
                     if form.get("scope")
-                    else row["scopes"]
+                    else row["effective_scopes"]
                 )
             except ValueError:
                 return self.oauth_error(400, "invalid_scope", "Invalid scope.")
-            if not set(scopes.split()).issubset(set(row["scopes"].split())):
+            if not set(scopes.split()).issubset(
+                set(row["effective_scopes"].split())
+            ):
                 return self.oauth_error(400, "invalid_scope", "Scope cannot expand.")
             database.execute(
                 "UPDATE oauth_tokens SET used_at=? WHERE token_hash=?",
                 (now, row["token_hash"]),
             )
             access, refresh = self.issue_oauth_pair(
-                database, row["grant_id"], row["family_id"]
+                database, row["grant_id"], scopes, row["family_id"]
             )
         return self.oauth_token_response(access, refresh, scopes)
 
@@ -1755,6 +1824,62 @@ class Handler(BaseHTTPRequestHandler):
         """Hash a request purpose and safe client address for bounded throttling."""
         value = purpose + "\0" + self.login_client_address()
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def cleanup_expired_oauth_records(self, database, now):
+        """Remove expired transient records and unclaimed public clients safely."""
+        database.execute("DELETE FROM oauth_flows WHERE expires_at<=?", (now,))
+        database.execute("DELETE FROM oauth_codes WHERE expires_at<=?", (now,))
+        database.execute(
+            """
+            DELETE FROM oauth_clients
+            WHERE created_at<=?
+              AND NOT EXISTS (
+                  SELECT 1 FROM oauth_grants
+                  WHERE oauth_grants.client_id=oauth_clients.client_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM oauth_codes
+                  WHERE oauth_codes.client_id=oauth_clients.client_id
+              )
+            """,
+            (now - OAUTH_CLIENT_TTL_SECONDS,),
+        )
+
+    def reserve_oauth_source(self, database, purpose, now, limit):
+        """Atomically reserve one public OAuth write without unbounded source rows."""
+        database.execute("BEGIN IMMEDIATE")
+        database.execute(
+            "DELETE FROM oauth_source_limits WHERE window_started<=?",
+            (now - OAUTH_PUBLIC_WINDOW_SECONDS,),
+        )
+        scope = self.attempt_scope("oauth-" + purpose)
+        row = database.execute(
+            """
+            SELECT window_started, request_count FROM oauth_source_limits
+            WHERE scope_hash=? AND purpose=?
+            """,
+            (scope, purpose),
+        ).fetchone()
+        if row and row["request_count"] >= limit:
+            retry_after = row["window_started"] + OAUTH_PUBLIC_WINDOW_SECONDS - now
+            return False, max(1, retry_after)
+        if not row:
+            stored = database.execute(
+                "SELECT COUNT(*) FROM oauth_source_limits"
+            ).fetchone()[0]
+            if stored >= OAUTH_SOURCE_LIMIT:
+                return False, OAUTH_PUBLIC_WINDOW_SECONDS
+        database.execute(
+            """
+            INSERT INTO oauth_source_limits
+                (scope_hash, purpose, window_started, request_count)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(scope_hash, purpose) DO UPDATE SET
+                request_count=oauth_source_limits.request_count+1
+            """,
+            (scope, purpose, now),
+        )
+        return True, 0
 
     def attempt_blocked(self, database, scope, now):
         """Return remaining block seconds, clearing an expired attempt window."""
