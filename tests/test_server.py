@@ -2,7 +2,9 @@
 
 import base64
 import concurrent.futures
+import contextlib
 import http.cookies
+import io
 import json
 import os
 import secrets
@@ -294,6 +296,169 @@ class McpReadinessUnitTests(unittest.TestCase):
         compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
         self.assertIn("http://127.0.0.1:8787/healthz", compose)
         self.assertIn("http://127.0.0.1:8787/mcp/ready", compose)
+
+
+class McpDiagnosticsUnitTests(unittest.TestCase):
+    """Prove optional MCP failure logs contain only safe transport metadata."""
+
+    headers = {
+        "Authorization": "Bearer header-secret-token",
+        "Cookie": "AICS_SESSION=cookie-secret-value",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": "2025-11-25",
+        "Mcp-Session-Id": "private-session-value",
+        "Last-Event-ID": "private-event-value",
+    }
+
+    @staticmethod
+    def request_body(secret="private-tool-argument"):
+        """Build an initialize-shaped request containing values logs must omit."""
+        return json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "private-client-name",
+                    "version": secret,
+                },
+                "arguments": {"prompt": secret},
+            },
+        }).encode("utf-8")
+
+    def capture(self, status, response_body, enabled):
+        """Capture one diagnostic attempt under an explicit feature setting."""
+        output = io.StringIO()
+        with unittest.mock.patch.object(server, "MCP_DIAGNOSTICS", enabled):
+            with contextlib.redirect_stderr(output):
+                server.log_mcp_internal_error(
+                    self.headers,
+                    self.request_body(),
+                    status,
+                    response_body,
+                )
+        return output.getvalue()
+
+    def test_diagnostics_are_disabled_by_default(self):
+        """Keep failure details silent unless the operator explicitly opts in."""
+        self.assertFalse(server.MCP_DIAGNOSTICS)
+        logged = self.capture(
+            400,
+            b'{"error":{"code":-32600,"message":"Invalid request"}}',
+            False,
+        )
+        self.assertEqual(logged, "")
+
+    def test_failure_log_contains_only_approved_metadata(self):
+        """Expose protocol clues while withholding headers and request content."""
+        response = json.dumps({
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32600,
+                "message": (
+                    "Invalid private-tool-argument; Bearer header-secret-token; "
+                    "cookie=AICS_SESSION=cookie-secret-value; "
+                    "session=private-session-value; event=private-event-value"
+                ),
+                "data": {"workspace": "private-workspace-content"},
+            },
+        }).encode("utf-8")
+        logged = self.capture(400, response, True)
+        self.assertTrue(logged.startswith("MCP diagnostic "))
+        diagnostic = json.loads(logged.removeprefix("MCP diagnostic "))
+        self.assertEqual(
+            set(diagnostic),
+            {
+                "correlation_id", "status", "jsonrpc_method",
+                "initialize_protocol_version", "accept_present",
+                "content_type_present", "mcp_protocol_version_present",
+                "mcp_session_id_present", "request_body_bytes",
+                "error_code", "error_message",
+            },
+        )
+        self.assertRegex(diagnostic["correlation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(diagnostic["status"], 400)
+        self.assertEqual(diagnostic["jsonrpc_method"], "initialize")
+        self.assertEqual(
+            diagnostic["initialize_protocol_version"], "2025-11-25"
+        )
+        self.assertTrue(diagnostic["accept_present"])
+        self.assertTrue(diagnostic["content_type_present"])
+        self.assertTrue(diagnostic["mcp_protocol_version_present"])
+        self.assertTrue(diagnostic["mcp_session_id_present"])
+        for secret in (
+            "header-secret-token", "cookie-secret-value",
+            "private-tool-argument", "private-client-name",
+            "private-workspace-content", "private-session-value",
+            "private-event-value",
+        ):
+            self.assertNotIn(secret, logged)
+        self.assertNotIn("Authorization", logged)
+        self.assertNotIn("Last-Event-ID", logged)
+        self.assertNotIn("arguments", logged)
+
+    def test_initialize_error_is_bounded_and_sanitized(self):
+        """Flatten control characters and cap the combined error fields."""
+        response = json.dumps({
+            "error": {
+                "code": "bad\ncode",
+                "message": "safe reason\n" + ("x" * 2_000),
+            }
+        }).encode("utf-8")
+        logged = self.capture(400, response, True)
+        diagnostic = json.loads(logged.removeprefix("MCP diagnostic "))
+        self.assertNotIn("\n", diagnostic["error_code"])
+        self.assertNotIn("\n", diagnostic["error_message"])
+        self.assertLessEqual(
+            len(diagnostic["error_code"]) + len(diagnostic["error_message"]),
+            server.MCP_DIAGNOSTIC_ERROR_LIMIT,
+        )
+
+    def test_absent_headers_and_malformed_metadata_are_reported_safely(self):
+        """Record missing headers without copying malformed protocol fields."""
+        body = json.dumps({
+            "method": "invalid method with spaces",
+            "params": {"protocolVersion": "bad version", "secret": 12345},
+        }).encode("utf-8")
+        output = io.StringIO()
+        with unittest.mock.patch.object(server, "MCP_DIAGNOSTICS", True):
+            with contextlib.redirect_stderr(output):
+                server.log_mcp_internal_error(
+                    {}, body, 415,
+                    b'{"error":{"code":-32600,"message":"Rejected 12345"}}',
+                )
+        diagnostic = json.loads(
+            output.getvalue().removeprefix("MCP diagnostic ")
+        )
+        self.assertFalse(diagnostic["accept_present"])
+        self.assertFalse(diagnostic["content_type_present"])
+        self.assertFalse(diagnostic["mcp_protocol_version_present"])
+        self.assertFalse(diagnostic["mcp_session_id_present"])
+        self.assertNotIn("jsonrpc_method", diagnostic)
+        self.assertNotIn("initialize_protocol_version", diagnostic)
+        self.assertNotIn("12345", diagnostic["error_message"])
+
+    def test_success_does_not_emit_diagnostic_error_log(self):
+        """Avoid diagnostic noise for successful internal MCP responses."""
+        logged = self.capture(
+            200,
+            b'{"jsonrpc":"2.0","result":{"private":"content"}}',
+            True,
+        )
+        self.assertEqual(logged, "")
+
+    def test_proxy_header_allowlist_preserves_mcp_transport_headers(self):
+        """Keep authentication and all Streamable HTTP state headers forwarded."""
+        self.assertEqual(
+            server.MCP_FORWARDED_HEADERS,
+            (
+                "Authorization", "Accept", "Content-Type",
+                "MCP-Protocol-Version", "Mcp-Session-Id", "Last-Event-ID",
+            ),
+        )
 
 
 class WorkspacePlanningMigrationTests(unittest.TestCase):
