@@ -58,7 +58,16 @@ MCP_FORWARDED_HEADERS = (
     "MCP-Protocol-Version",
     "Mcp-Session-Id",
     "Last-Event-ID",
+    "Mcp-Method",
+    "Mcp-Name",
 )
+MCP_FORWARDED_HEADER_NAMES = frozenset(
+    name.lower() for name in MCP_FORWARDED_HEADERS
+)
+MCP_PARAM_HEADER_PREFIX = "mcp-param-"
+MCP_HOP_BY_HOP_HEADERS = frozenset({
+    "host", "connection", "content-length", "transfer-encoding", "upgrade",
+})
 MCP_SAFE_METHOD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_./-]{0,127}")
 MCP_SAFE_VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MCP_DIAGNOSTIC_ERROR_LIMIT = 1_024
@@ -132,6 +141,26 @@ def parse_trusted_proxy_networks(value):
 TRUSTED_PROXY_NETWORKS = parse_trusted_proxy_networks(
     os.environ.get("AICS_TRUSTED_PROXY_NETWORKS", "")
 )
+
+
+def is_forwarded_mcp_header(name):
+    """Return whether a client header is safe MCP end-to-end metadata."""
+    lowered = name.lower()
+    if lowered in MCP_HOP_BY_HOP_HEADERS:
+        return False
+    return (
+        lowered in MCP_FORWARDED_HEADER_NAMES
+        or lowered.startswith(MCP_PARAM_HEADER_PREFIX)
+    )
+
+
+def forwarded_mcp_headers(headers):
+    """Copy client-provided MCP headers without deriving values from the body."""
+    return {
+        name: value
+        for name, value in headers.items()
+        if is_forwarded_mcp_header(name)
+    }
 
 
 def parse_mcp_diagnostic_request(body):
@@ -216,11 +245,11 @@ def log_mcp_internal_error(headers, body, status, response_body):
     method, protocol_version, sensitive_values = parse_mcp_diagnostic_request(body)
     # Header values are never approved diagnostic fields. Retain them only long
     # enough to redact any value reflected by the internal transport error.
-    for name in MCP_FORWARDED_HEADERS + ("Cookie",):
-        value = headers.get(name, "")
-        if value:
+    for name, value in headers.items():
+        lowered = name.lower()
+        if value and (lowered == "cookie" or is_forwarded_mcp_header(name)):
             sensitive_values += (value,)
-            if name == "Authorization" and value.startswith("Bearer "):
+            if lowered == "authorization" and value.startswith("Bearer "):
                 sensitive_values += (value[7:],)
 
     error_code = None
@@ -1968,11 +1997,9 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.read_body(MAX_BYTES)
             except ValueError:
                 return self.json_reply(413, {"error": "MCP request is too large."})
-        forwarded = {}
-        for name in MCP_FORWARDED_HEADERS:
-            value = self.headers.get(name)
-            if value:
-                forwarded[name] = value
+        # Preserve modern routing metadata exactly as the client supplied it.
+        # The MCP SDK, not the proxy, validates it against the JSON-RPC body.
+        forwarded = forwarded_mcp_headers(self.headers)
         try:
             connection = http.client.HTTPConnection(
                 "127.0.0.1", MCP_INTERNAL_PORT, timeout=310
