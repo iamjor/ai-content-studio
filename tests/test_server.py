@@ -110,15 +110,40 @@ class TestClient:
             extra_headers=extra_headers,
         )
 
-    def register(self, username, display_name, password, extra=None):
-        """Register a regular user and retain the new authenticated session."""
+    def complete_recovery_setup(self):
+        """Complete the required recovery-code flow for an authenticated fixture."""
+        status, generated, _ = self.request(
+            "/api/account/recovery-codes/generate", method="POST", payload={}
+        )
+        if status != 201:
+            raise RuntimeError(f"Recovery-code generation failed: {generated}")
+        status, confirmed, _ = self.request(
+            "/api/account/recovery-codes/confirm", method="POST",
+            payload={
+                "setId": generated["setId"],
+                "recoveryCode": generated["codes"][0],
+            },
+        )
+        if status != 200:
+            raise RuntimeError(f"Recovery-code confirmation failed: {confirmed}")
+
+    def register(
+        self, username, display_name, password, extra=None, complete_setup=True
+    ):
+        """Register a user and normally complete required recovery setup."""
         payload = {
             "username": username,
             "displayName": display_name,
             "password": password,
         }
         payload.update(extra or {})
-        return self.request("/api/register", method="POST", payload=payload)
+        response = self.request("/api/register", method="POST", payload=payload)
+        if (
+            complete_setup and response[0] == 201
+            and response[1]["user"]["recoverySetupRequired"]
+        ):
+            self.complete_recovery_setup()
+        return response
 
 
 class LoginThrottleUnitTests(unittest.TestCase):
@@ -517,6 +542,87 @@ class McpProxyHeaderUnitTests(unittest.TestCase):
         )
 
 
+class RecoveryTimingUnitTests(unittest.TestCase):
+    """Keep public recovery hash work independent of account state."""
+
+    def test_existing_and_missing_accounts_run_fixed_verification_count(self):
+        """Verify exactly one full recovery set for either username outcome."""
+        with tempfile.TemporaryDirectory(prefix="aics-recovery-count-") as directory:
+            database_path = Path(directory) / "recovery.sqlite3"
+            with unittest.mock.patch.multiple(
+                server,
+                DB_PATH=database_path,
+                ADMIN_USERNAME=ADMIN_USERNAME,
+                ADMIN_PASSWORD=ADMIN_PASSWORD,
+                ADMIN_DISPLAY_NAME="Studio Owner",
+            ):
+                server.setup()
+                now = int(time.time())
+                with sqlite3.connect(database_path) as database:
+                    password_hash = database.execute(
+                        "SELECT password_hash FROM users WHERE role='admin'"
+                    ).fetchone()[0]
+                    user_id = database.execute(
+                        """
+                        INSERT INTO users
+                            (username, display_name, password_hash, role,
+                             created_at, updated_at)
+                        VALUES ('timed-user', 'Timed User', ?, 'user', ?, ?)
+                        """,
+                        (password_hash, now, now),
+                    ).lastrowid
+                    database.executemany(
+                        """
+                        INSERT INTO recovery_codes
+                            (user_id, set_id, salt, code_hash, created_at,
+                             confirmed_at, used_at)
+                        VALUES (?, 'timed-set', ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            (
+                                user_id, "00" * 16, "11" * 32, now, now,
+                                now if index % 2 else None,
+                            )
+                            for index in range(server.RECOVERY_CODE_COUNT)
+                        ),
+                    )
+
+                handler = object.__new__(server.Handler)
+                handler.read_json = unittest.mock.Mock(side_effect=[
+                    {
+                        "username": "timed-user",
+                        "recoveryCode": "INVALID-CODE",
+                        "newPassword": "replacement-password-123",
+                    },
+                    {
+                        "username": "missing-user",
+                        "recoveryCode": "INVALID-CODE",
+                        "newPassword": "replacement-password-123",
+                    },
+                ])
+                handler.attempt_scope = unittest.mock.Mock(return_value="source")
+                handler.reserve_attempt = unittest.mock.Mock(
+                    return_value=(True, 0, 0)
+                )
+                handler.generic_recovery_reply = unittest.mock.Mock(
+                    return_value="generic"
+                )
+                with unittest.mock.patch.object(
+                    server, "hash_password", return_value="unused-password-hash"
+                ), unittest.mock.patch.object(
+                    server, "verify_recovery_code", return_value=False
+                ) as verify:
+                    self.assertEqual(handler.recover_password(), "generic")
+                    self.assertEqual(
+                        verify.call_count, server.RECOVERY_CODE_COUNT
+                    )
+                    verify.reset_mock()
+                    self.assertEqual(handler.recover_password(), "generic")
+                    self.assertEqual(
+                        verify.call_count, server.RECOVERY_CODE_COUNT
+                    )
+
+
 class WorkspacePlanningMigrationTests(unittest.TestCase):
     """Verify v0.2 defaults preserve owner-entered legacy planning records."""
 
@@ -631,6 +737,122 @@ class WorkspacePlanningMigrationTests(unittest.TestCase):
                 )
 
 
+    def test_v6_expands_only_active_legacy_admin_mcp_scopes(self):
+        """Retain admin archive and delete tools without elevating normal users."""
+        with tempfile.TemporaryDirectory(prefix="aics-v6-admin-scopes-") as directory:
+            database_path = Path(directory) / "migration.sqlite3"
+            admin_token = "admin-migration-" + secrets.token_urlsafe(40)
+            user_token = "user-migration-" + secrets.token_urlsafe(40)
+            with unittest.mock.patch.multiple(
+                server,
+                DB_PATH=database_path,
+                ADMIN_USERNAME=ADMIN_USERNAME,
+                ADMIN_PASSWORD=ADMIN_PASSWORD,
+                ADMIN_DISPLAY_NAME="Studio Owner",
+            ):
+                server.setup()
+                now = int(time.time())
+                with sqlite3.connect(database_path) as database:
+                    admin_id, password_hash = database.execute(
+                        "SELECT id, password_hash FROM users WHERE role='admin'"
+                    ).fetchone()
+                    user_id = database.execute(
+                        """
+                        INSERT INTO users
+                            (username, display_name, password_hash, role,
+                             created_at, updated_at)
+                        VALUES ('migration-user', 'Migration User', ?,
+                                'user', ?, ?)
+                        """,
+                        (password_hash, now, now),
+                    ).lastrowid
+                    database.execute(
+                        """
+                        INSERT INTO mcp_permissions
+                            (user_id, enabled, can_read, can_write,
+                             can_archive, can_delete, updated_at)
+                        VALUES (?, 1, 1, 1, 0, 0, ?)
+                        """,
+                        (user_id, now),
+                    )
+                    database.executemany(
+                        "INSERT INTO oauth_clients VALUES (?, ?, '[]', ?)",
+                        (
+                            ("legacy-admin", "Legacy admin", now),
+                            ("legacy-user", "Legacy user", now),
+                        ),
+                    )
+                    admin_grant = database.execute(
+                        """
+                        INSERT INTO oauth_grants
+                            (user_id, client_id, scopes, created_at)
+                        VALUES (?, 'legacy-admin', 'aics.read aics.write', ?)
+                        """,
+                        (admin_id, now),
+                    ).lastrowid
+                    user_grant = database.execute(
+                        """
+                        INSERT INTO oauth_grants
+                            (user_id, client_id, scopes, created_at)
+                        VALUES (?, 'legacy-user', 'aics.read aics.write', ?)
+                        """,
+                        (user_id, now),
+                    ).lastrowid
+                    database.executemany(
+                        """
+                        INSERT INTO oauth_tokens
+                            (token_hash, grant_id, token_type, family_id,
+                             created_at, expires_at, scopes)
+                        VALUES (?, ?, 'access', ?, ?, ?, 'aics.read aics.write')
+                        """,
+                        (
+                            (server.token_hash(admin_token), admin_grant,
+                             "admin-family", now, now + 3600),
+                            (server.token_hash(user_token), user_grant,
+                             "user-family", now, now + 3600),
+                        ),
+                    )
+                    database.execute(
+                        "UPDATE app_settings SET value='5' WHERE key='schema_version'"
+                    )
+
+                server.setup()
+                expanded = "aics.archive aics.delete aics.read aics.write"
+                with sqlite3.connect(database_path) as database:
+                    grant_scopes = dict(database.execute(
+                        "SELECT client_id, scopes FROM oauth_grants"
+                    ).fetchall())
+                    token_scopes = dict(database.execute(
+                        """
+                        SELECT g.client_id, t.scopes FROM oauth_tokens t
+                        JOIN oauth_grants g ON g.id=t.grant_id
+                        """
+                    ).fetchall())
+                self.assertEqual(grant_scopes["legacy-admin"], expanded)
+                self.assertEqual(token_scopes["legacy-admin"], expanded)
+                self.assertEqual(
+                    grant_scopes["legacy-user"], "aics.read aics.write"
+                )
+                self.assertEqual(
+                    token_scopes["legacy-user"], "aics.read aics.write"
+                )
+                self.assertIsNotNone(
+                    server.resolve_access_token(admin_token, "aics.archive")
+                )
+                self.assertIsNotNone(
+                    server.resolve_access_token(admin_token, "aics.delete")
+                )
+                self.assertIsNotNone(
+                    server.resolve_access_token(user_token, "aics.write")
+                )
+                self.assertIsNone(
+                    server.resolve_access_token(user_token, "aics.archive")
+                )
+                self.assertIsNone(
+                    server.resolve_access_token(user_token, "aics.delete")
+                )
+
+
 class ServerIntegrationTests(unittest.TestCase):
     """Exercise public defaults and authenticated behavior against a real server."""
 
@@ -740,6 +962,8 @@ class ServerIntegrationTests(unittest.TestCase):
         status, payload, _ = client.login(ADMIN_USERNAME, ADMIN_PASSWORD)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["user"]["role"], "admin")
+        if payload["user"]["recoverySetupRequired"]:
+            client.complete_recovery_setup()
         return client
 
     def set_registration(self, enabled):
@@ -781,6 +1005,8 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["user"]["role"], "admin")
         self.assertEqual(payload["version"], "0.4.0")
+        if payload["user"]["recoverySetupRequired"]:
+            admin.complete_recovery_setup()
         set_cookie = headers.get("Set-Cookie", "")
         self.assertIn("HttpOnly", set_cookie)
         self.assertIn("SameSite=Strict", set_cookie)
@@ -2608,7 +2834,8 @@ class ServerIntegrationTests(unittest.TestCase):
         self.set_registration(True)
         client = TestClient(self.base_url)
         status, registered, _ = client.register(
-            "recoverable", "Recovery User", "initial-password-123"
+            "recoverable", "Recovery User", "initial-password-123",
+            complete_setup=False,
         )
         self.assertEqual(status, 201, registered)
         self.assertTrue(registered["user"]["recoverySetupRequired"])
@@ -2665,6 +2892,89 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(replay[0], 200)
         self.assertEqual(replay[1]["message"], recovered[1]["message"])
         self.assertEqual(TestClient(self.base_url).login("recoverable", "recovered-password-123")[0], 200)
+
+    def test_21b_setup_flags_block_direct_api_bypasses(self):
+        """Permit only the required setup sequence for incomplete sessions."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        user = TestClient(self.base_url)
+        self.assertEqual(user.register(
+            "setup-guard", "Setup Guard", "setup-guard-password"
+        )[0], 201)
+        admin = self.admin_client()
+        target = next(
+            item for item in admin.request("/api/admin/users")[1]["users"]
+            if item["username"] == "setup-guard"
+        )
+        reset = admin.request(
+            f"/api/admin/users/{target['id']}/reset-password",
+            method="POST",
+            payload={"temporaryPassword": "", "requireChange": True},
+        )
+        self.assertEqual(reset[0], 200, reset[1])
+
+        forced = TestClient(self.base_url)
+        status, bootstrap, _ = forced.login(
+            "setup-guard", reset[1]["temporaryPassword"]
+        )
+        self.assertEqual(status, 200, bootstrap)
+        self.assertTrue(bootstrap["user"]["mustChangePassword"])
+        self.assertTrue(bootstrap["user"]["recoverySetupRequired"])
+        self.assertEqual(forced.request("/api/session")[0], 200)
+        blocked_gets = [
+            "/api/workspace",
+            "/api/tools",
+            "/api/account/integrations",
+            "/api/projects/project/prompts/prompt/attachments",
+            "/api/characters/character/image",
+            "/api/admin/users",
+        ]
+        for path in blocked_gets:
+            with self.subTest(path=path):
+                self.assertEqual(forced.request(path)[0], 403)
+        self.assertEqual(forced.request(
+            "/api/tools", method="POST",
+            payload={
+                "name": "Blocked", "category": "Test",
+                "url": "https://example.com", "purpose": "Blocked",
+                "notes": "",
+            },
+        )[0], 403)
+        self.assertEqual(forced.request(
+            "/api/workspace", method="PUT",
+            payload={"revision": 0, "data": {"projects": [], "activeId": ""}},
+        )[0], 403)
+        self.assertEqual(forced.request(
+            "/api/account/integrations/1", method="DELETE"
+        )[0], 403)
+        self.assertEqual(forced.request(
+            "/api/account", method="PUT", payload={"theme": "light"}
+        )[0], 403)
+
+        changed = forced.request(
+            "/api/account", method="PUT",
+            payload={
+                "currentPassword": reset[1]["temporaryPassword"],
+                "newPassword": "setup-guard-replacement",
+            },
+        )
+        self.assertEqual(changed[0], 200, changed[1])
+        status, bootstrap, _ = forced.login(
+            "setup-guard", "setup-guard-replacement"
+        )
+        self.assertEqual(status, 200, bootstrap)
+        self.assertFalse(bootstrap["user"]["mustChangePassword"])
+        self.assertTrue(bootstrap["user"]["recoverySetupRequired"])
+        self.assertEqual(forced.request("/api/workspace")[0], 403)
+        self.assertEqual(forced.request(
+            "/api/logout", method="POST", payload={}
+        )[0], 200)
+
+        self.assertEqual(forced.login(
+            "setup-guard", "setup-guard-replacement"
+        )[0], 200)
+        forced.complete_recovery_setup()
+        self.assertEqual(forced.request("/api/workspace")[0], 200)
 
     def test_22_admin_reset_contact_url_and_mcp_revocation(self):
         """Reset credentials without secrets in events and revoke reduced MCP access immediately."""
@@ -2740,6 +3050,33 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertLess(len(body), server.MAX_PROMPT_BODY)
         self.assertEqual(owner.request("/api/workspace", method="PUT", payload={"revision": 0, "data": workspace})[0], 200)
         path = "/api/projects/private-project/prompts/master-prompt/attachments"
+        for encoded_name in ("notes%0D.md", "notes%0A.md"):
+            with self.subTest(encoded_name=encoded_name):
+                rejected = owner.request(
+                    path, method="PUT", raw_body=b"unsafe name\n",
+                    extra_headers={
+                        "Content-Type": "text/markdown",
+                        "X-File-Name": encoded_name,
+                    },
+                )
+                self.assertEqual(rejected[0], 400, rejected[1])
+        unicode_name = "r\xe9sum\xe9.md"
+        unicode_upload = owner.request(
+            path, method="PUT", raw_body=b"unicode filename\n",
+            extra_headers={
+                "Content-Type": "text/markdown",
+                "X-File-Name": urllib.parse.quote(unicode_name),
+            },
+        )
+        self.assertEqual(unicode_upload[0], 201, unicode_upload[1])
+        unicode_id = unicode_upload[1]["attachment"]["id"]
+        unicode_download = owner.request(path + "/" + str(unicode_id))
+        self.assertEqual(unicode_download[0], 200)
+        self.assertEqual(unicode_download[1], "unicode filename\n")
+        self.assertIn(
+            "filename*=UTF-8''r%C3%A9sum%C3%A9.md",
+            unicode_download[2]["Content-Disposition"],
+        )
         uploaded = owner.request(
             path, method="PUT", raw_body=b"private markdown\n",
             extra_headers={"Content-Type": "text/markdown", "X-File-Name": "notes.md"},

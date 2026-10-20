@@ -19,7 +19,7 @@ import zipfile
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 APP_NAME = "AI Content Studio"
 APP_VERSION = "0.4.0"
@@ -549,6 +549,23 @@ def verify_recovery_code(code, salt_hex, digest_hex):
     return hmac.compare_digest(actual, digest_hex)
 
 
+RECOVERY_DUMMY_SALT = "00" * 16
+RECOVERY_DUMMY_HASH = "00" * 32
+
+
+def attachment_content_disposition(disposition, filename):
+    """Build an ASCII-safe header while retaining a valid Unicode filename."""
+    fallback = "".join(
+        character for character in filename
+        if 32 <= ord(character) < 127 and character not in {chr(34), chr(92)}
+    ) or "download"
+    encoded = quote(filename, safe="")
+    return (
+        f"{disposition}; filename=\"{fallback}\"; "
+        f"filename*=UTF-8\x27\x27{encoded}"
+    )
+
+
 def detect_prompt_attachment(data, filename, claimed_type):
     """Validate supported attachment signatures and return a trusted MIME type."""
     image_type = detect_image_type(data)
@@ -904,6 +921,27 @@ def setup():
             previous_schema = int(get_setting(database, "schema_version", "0"))
         except ValueError:
             previous_schema = 0
+        if previous_schema < 6:
+            expanded_admin_scopes = "aics.archive aics.delete aics.read aics.write"
+            legacy_admin_grants = """
+                SELECT g.id FROM oauth_grants g
+                JOIN users u ON u.id=g.user_id
+                WHERE u.role='admin' AND g.revoked_at IS NULL
+                  AND g.scopes IN ('aics.read aics.write', 'aics.write aics.read')
+            """
+            database.execute(
+                f"""
+                UPDATE oauth_tokens SET scopes=?
+                WHERE revoked_at IS NULL AND expires_at>?
+                  AND scopes IN ('', 'aics.read aics.write', 'aics.write aics.read')
+                  AND grant_id IN ({legacy_admin_grants})
+                """,
+                (expanded_admin_scopes, int(time.time())),
+            )
+            database.execute(
+                f"UPDATE oauth_grants SET scopes=? WHERE id IN ({legacy_admin_grants})",
+                (expanded_admin_scopes,),
+            )
         if (
             previous_schema < 3
             and database.execute("SELECT COUNT(*) FROM tools").fetchone()[0] == 0
@@ -1281,11 +1319,19 @@ class Handler(BaseHTTPRequestHandler):
             parts.append("Secure")
         return "; ".join(parts)
 
-    def require_session(self, admin=False, csrf=False):
-        """Require an active session, optional admin role, and optional CSRF token."""
+    def require_session(self, admin=False, csrf=False, allow_setup=False):
+        """Require an active, setup-complete session and optional protections."""
         session = self.current_session()
         if not session:
             self.json_reply(401, {"error": "Your session has expired. Sign in again."})
+            return None
+        if not allow_setup and (
+            session["must_change_password"] or session["recovery_setup_required"]
+        ):
+            self.json_reply(
+                403,
+                {"error": "Complete account security setup before continuing."},
+            )
             return None
         if admin and session["role"] != "admin":
             self.json_reply(403, {"error": "Administrator access is required."})
@@ -1425,12 +1471,12 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return self.create_tool(session)
         if path == "/api/account/recovery-codes/generate":
-            session = self.require_session(csrf=True)
+            session = self.require_session(csrf=True, allow_setup=True)
             if not session:
                 return None
             return self.generate_account_recovery_codes(session)
         if path == "/api/account/recovery-codes/confirm":
-            session = self.require_session(csrf=True)
+            session = self.require_session(csrf=True, allow_setup=True)
             if not session:
                 return None
             return self.confirm_account_recovery_codes(session)
@@ -1440,7 +1486,7 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return self.admin_reset_password(path, session)
         if path == "/api/logout":
-            session = self.require_session(csrf=True)
+            session = self.require_session(csrf=True, allow_setup=True)
             if not session:
                 return None
             with connect() as database:
@@ -1461,7 +1507,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_reply(403, {"error": "Cross-site request rejected."})
         path = urlsplit(self.path).path
         session = self.require_session(
-            admin=path.startswith("/api/admin/"), csrf=True
+            admin=path.startswith("/api/admin/"), csrf=True,
+            allow_setup=path == "/api/account",
         )
         if not session:
             return None
@@ -1903,9 +1950,10 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as database:
             account = database.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             effective_scopes = permitted_oauth_scopes(database, user_id, request_data["scope"])
-        if (not account or (account["role"] != "admin" and (
-                account["must_change_password"] or account["recovery_setup_required"]
-            )) or not effective_scopes):
+        if (
+            not account or account["must_change_password"]
+            or account["recovery_setup_required"] or not effective_scopes
+        ):
             return self.oauth_error(403, "access_denied", "MCP access is not available for this account.")
         raw_code = secrets.token_urlsafe(32)
         with connect() as database:
@@ -2697,12 +2745,23 @@ class Handler(BaseHTTPRequestHandler):
             rows = database.execute(
                 """
                 SELECT * FROM recovery_codes
-                WHERE user_id=? AND confirmed_at IS NOT NULL AND used_at IS NULL
-                """, (user["id"] if user else -1,)
+                WHERE user_id=? AND confirmed_at IS NOT NULL
+                ORDER BY id LIMIT ?
+                """, (user["id"] if user else -1, RECOVERY_CODE_COUNT)
             ).fetchall()
-            matched = next((row for row in rows if verify_recovery_code(
-                code, row["salt"], row["code_hash"]
-            )), None)
+            candidates = list(rows) + [None] * (RECOVERY_CODE_COUNT - len(rows))
+            matches = [
+                verify_recovery_code(
+                    code,
+                    row["salt"] if row else RECOVERY_DUMMY_SALT,
+                    row["code_hash"] if row else RECOVERY_DUMMY_HASH,
+                )
+                for row in candidates
+            ]
+            matched = next((
+                row for row, matches_code in zip(candidates, matches)
+                if row is not None and row["used_at"] is None and matches_code
+            ), None)
             if user and user["is_active"] and not user["archived_at"] and matched:
                 changed = database.execute(
                     "UPDATE recovery_codes SET used_at=? WHERE id=? AND used_at IS NULL",
@@ -2906,10 +2965,11 @@ class Handler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             return self.json_reply(404, {"error": "Attachment not found."})
         disposition = "inline" if row["mime_type"].startswith("image/") else "attachment"
-        safe_name = row["filename"].replace('"', "")
         return self.reply(200, data, row["mime_type"], {
             "Cache-Control": "private, no-store",
-            "Content-Disposition": f'{disposition}; filename="{safe_name}"',
+            "Content-Disposition": attachment_content_disposition(
+                disposition, row["filename"]
+            ),
             "X-Content-Type-Options": "nosniff",
         })
 
@@ -2921,7 +2981,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Replace is not supported")
             filename = unquote(self.headers.get("X-File-Name", ""))
             claimed = self.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip().lower()
-            if not filename or len(filename) > 200 or any(character in filename for character in "/\\\0"):
+            if (
+                not filename or len(filename) > 200
+                or any(character in filename for character in "/\\")
+                or any(ord(character) < 32 or ord(character) == 127 for character in filename)
+            ):
                 raise ValueError("Invalid filename")
             data = self.read_body(MAX_PROMPT_ATTACHMENT_BYTES)
             mime_type = detect_prompt_attachment(data, filename, claimed)
@@ -3138,6 +3202,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_reply(400, {"error": "Invalid account update."})
         if set(value) - {"displayName", "theme", "currentPassword", "newPassword"}:
             return self.json_reply(400, {"error": "Invalid account update."})
+        if session["must_change_password"]:
+            if set(value) != {"currentPassword", "newPassword"}:
+                return self.json_reply(403, {
+                    "error": "Change the temporary password before continuing."
+                })
+        elif session["recovery_setup_required"]:
+            return self.json_reply(403, {
+                "error": "Complete recovery-code setup before continuing."
+            })
         updates = []
         parameters = []
         if "displayName" in value:
