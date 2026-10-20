@@ -72,7 +72,7 @@ class TestClient:
             method=method,
         )
         try:
-            response = urllib.request.urlopen(request, timeout=5)
+            response = urllib.request.urlopen(request, timeout=20)
         except urllib.error.HTTPError as error:
             response = error
         raw = response.read()
@@ -155,11 +155,12 @@ class LoginThrottleUnitTests(unittest.TestCase):
         handler.read_json = unittest.mock.Mock(
             return_value={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD}
         )
+        handler.account_attempt_scope = unittest.mock.Mock(return_value="blocked-account")
         handler.attempt_scope = unittest.mock.Mock(return_value="blocked-source")
-        handler.reserve_attempt = unittest.mock.Mock(
+        handler.reserve_attempts = unittest.mock.Mock(
             return_value=(False, 60, 0)
         )
-        handler.json_reply = unittest.mock.Mock(return_value="blocked")
+        handler.throttle_reply = unittest.mock.Mock(return_value="blocked")
 
         database = unittest.mock.MagicMock()
         connection = unittest.mock.MagicMock()
@@ -171,11 +172,7 @@ class LoginThrottleUnitTests(unittest.TestCase):
         self.assertEqual(result, "blocked")
         verify.assert_not_called()
         database.execute.assert_not_called()
-        handler.json_reply.assert_called_once_with(
-            429,
-            {"error": "Too many attempts. Try again later."},
-            {"Retry-After": "60"},
-        )
+        handler.throttle_reply.assert_called_once_with(60)
 
     def test_concurrent_burst_reserves_limit_before_verification(self):
         """Allow only the atomic limit to verify or create server sessions."""
@@ -285,6 +282,33 @@ class LoginThrottleUnitTests(unittest.TestCase):
                         "SELECT COUNT(*) FROM sessions"
                     ).fetchone()[0]
                 self.assertEqual(session_count, server.LOGIN_LIMIT)
+
+    def test_multi_scope_storage_stays_bounded(self):
+        """Prune new account and source scope rows to the configured cap."""
+        handler = object.__new__(server.Handler)
+        with tempfile.TemporaryDirectory(prefix="aics-throttle-cap-") as directory:
+            database_path = Path(directory) / "attempts.sqlite3"
+            with sqlite3.connect(database_path) as database:
+                database.row_factory = sqlite3.Row
+                database.execute(
+                    "CREATE TABLE login_attempts (scope_hash TEXT PRIMARY KEY, failures INTEGER NOT NULL, window_started INTEGER NOT NULL, blocked_until INTEGER NOT NULL)"
+                )
+                database.commit()
+                with unittest.mock.patch.object(server, "LOGIN_SCOPE_LIMIT", 3):
+                    for batch in range(3):
+                        accepted, _, _ = handler.reserve_attempts(
+                            database,
+                            tuple((f"scope-{batch}-{index}", 5) for index in range(3)),
+                            int(time.time()) + batch,
+                        )
+                        self.assertTrue(accepted)
+                        database.commit()
+                self.assertLessEqual(
+                    database.execute(
+                        "SELECT COUNT(*) FROM login_attempts"
+                    ).fetchone()[0],
+                    3,
+                )
 
     def test_forwarded_address_requires_a_trusted_direct_peer(self):
         """Use Cloudflare's address only when the immediate peer is trusted."""
@@ -545,8 +569,8 @@ class McpProxyHeaderUnitTests(unittest.TestCase):
 class RecoveryTimingUnitTests(unittest.TestCase):
     """Keep public recovery hash work independent of account state."""
 
-    def test_existing_and_missing_accounts_run_fixed_verification_count(self):
-        """Verify exactly one full recovery set for either username outcome."""
+    def test_recovery_set_states_run_fixed_verification_count(self):
+        """Verify eight hashes for full, partial, exhausted, and missing sets."""
         with tempfile.TemporaryDirectory(prefix="aics-recovery-count-") as directory:
             database_path = Path(directory) / "recovery.sqlite3"
             with unittest.mock.patch.multiple(
@@ -586,6 +610,15 @@ class RecoveryTimingUnitTests(unittest.TestCase):
                             for index in range(server.RECOVERY_CODE_COUNT)
                         ),
                     )
+                    for username, used_at in (("full-user", None), ("exhausted-user", now)):
+                        extra_user_id = database.execute(
+                            "INSERT INTO users (username, display_name, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, 'user', ?, ?)",
+                            (username, username, password_hash, now, now),
+                        ).lastrowid
+                        database.executemany(
+                            "INSERT INTO recovery_codes (user_id, set_id, salt, code_hash, created_at, confirmed_at, used_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            ((extra_user_id, username + "-set", "00" * 16, "11" * 32, now, now, used_at) for _ in range(server.RECOVERY_CODE_COUNT)),
+                        )
 
                 handler = object.__new__(server.Handler)
                 handler.read_json = unittest.mock.Mock(side_effect=[
@@ -595,13 +628,24 @@ class RecoveryTimingUnitTests(unittest.TestCase):
                         "newPassword": "replacement-password-123",
                     },
                     {
+                        "username": "full-user",
+                        "recoveryCode": "INVALID-CODE",
+                        "newPassword": "replacement-password-123",
+                    },
+                    {
+                        "username": "exhausted-user",
+                        "recoveryCode": "INVALID-CODE",
+                        "newPassword": "replacement-password-123",
+                    },
+                    {
                         "username": "missing-user",
                         "recoveryCode": "INVALID-CODE",
                         "newPassword": "replacement-password-123",
                     },
                 ])
+                handler.account_attempt_scope = unittest.mock.Mock(return_value="account")
                 handler.attempt_scope = unittest.mock.Mock(return_value="source")
-                handler.reserve_attempt = unittest.mock.Mock(
+                handler.reserve_attempts = unittest.mock.Mock(
                     return_value=(True, 0, 0)
                 )
                 handler.generic_recovery_reply = unittest.mock.Mock(
@@ -612,15 +656,12 @@ class RecoveryTimingUnitTests(unittest.TestCase):
                 ), unittest.mock.patch.object(
                     server, "verify_recovery_code", return_value=False
                 ) as verify:
-                    self.assertEqual(handler.recover_password(), "generic")
-                    self.assertEqual(
-                        verify.call_count, server.RECOVERY_CODE_COUNT
-                    )
-                    verify.reset_mock()
-                    self.assertEqual(handler.recover_password(), "generic")
-                    self.assertEqual(
-                        verify.call_count, server.RECOVERY_CODE_COUNT
-                    )
+                    for _ in range(4):
+                        self.assertEqual(handler.recover_password(), "generic")
+                        self.assertEqual(
+                            verify.call_count, server.RECOVERY_CODE_COUNT
+                        )
+                        verify.reset_mock()
 
 
 class WorkspacePlanningMigrationTests(unittest.TestCase):
@@ -996,7 +1037,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(session["authenticated"])
         self.assertFalse(session["registrationEnabled"])
-        self.assertEqual(session["version"], "0.4.0")
+        self.assertEqual(session["version"], "0.4.1")
 
     def test_02_admin_login_hashing_and_legacy_migration(self):
         """Hash the bootstrap password and assign legacy data to the initial admin."""
@@ -1004,7 +1045,7 @@ class ServerIntegrationTests(unittest.TestCase):
         status, payload, headers = admin.login(ADMIN_USERNAME, ADMIN_PASSWORD)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["user"]["role"], "admin")
-        self.assertEqual(payload["version"], "0.4.0")
+        self.assertEqual(payload["version"], "0.4.1")
         if payload["user"]["recoverySetupRequired"]:
             admin.complete_recovery_setup()
         set_cookie = headers.get("Set-Cookie", "")
@@ -1443,35 +1484,39 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 403)
 
     def test_12_login_throttling(self):
-        """Block one trusted source before allowing a separate source to sign in."""
-        client = TestClient(self.base_url)
-        blocked_headers = {"CF-Connecting-IP": "198.51.100.40"}
+        """Limit one account without blocking a neighbor on the same source."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        victim = TestClient(self.base_url)
+        self.assertEqual(victim.register(
+            "throttled-user", "Throttled User", "throttled-password-123"
+        )[0], 201)
+        shared_headers = {"CF-Connecting-IP": "198.51.100.40"}
         statuses = []
-        for attempt in range(5):
-            status, _, _ = client.login(
-                "changing-" + str(attempt),
+        for _ in range(server.LOGIN_LIMIT):
+            status, _, _ = TestClient(self.base_url).login(
+                " THROTTLED-USER ",
                 "incorrect-password",
-                extra_headers=blocked_headers,
+                extra_headers=shared_headers,
             )
             statuses.append(status)
         self.assertEqual(statuses[-1], 429)
 
-        status, payload, headers = client.login(
-            "another-name",
-            "incorrect-password",
-            extra_headers=blocked_headers,
+        status, payload, headers = TestClient(self.base_url).login(
+            "throttled-user",
+            "throttled-password-123",
+            extra_headers=shared_headers,
         )
         self.assertEqual(status, 429)
-        self.assertIn("later", payload["error"].lower())
+        self.assertIn("seconds", payload["error"].lower())
         self.assertIsNotNone(headers.get("Retry-After"))
 
-        trusted_client = TestClient(self.base_url)
-        status, payload, _ = trusted_client.login(
-            ADMIN_USERNAME,
-            ADMIN_PASSWORD,
-            extra_headers={"CF-Connecting-IP": "198.51.100.41"},
+        status, payload, _ = TestClient(self.base_url).login(
+            ADMIN_USERNAME, ADMIN_PASSWORD, extra_headers=shared_headers
         )
         self.assertEqual(status, 200, payload)
+        self.assertGreater(server.LOGIN_SOURCE_LIMIT, server.LOGIN_LIMIT)
+        self.assertGreater(server.LOGIN_ACCOUNT_LIMIT, server.LOGIN_LIMIT)
 
         self.assertEqual(
             TestClient(self.base_url).login("x" * 41, "incorrect-password")[0],
@@ -1485,6 +1530,28 @@ class ServerIntegrationTests(unittest.TestCase):
             TestClient(self.base_url).login("bounded", "x" * 5_000)[0],
             400,
         )
+
+    def test_12a_recovery_and_login_throttles_are_separate(self):
+        """Keep recovery failures out of an unrelated account login allowance."""
+        shared_headers = {"CF-Connecting-IP": "198.51.100.42"}
+        responses = [
+            TestClient(self.base_url).request(
+                "/api/recover", method="POST",
+                payload={
+                    "username": "recovery-target",
+                    "recoveryCode": "INVALID",
+                    "newPassword": "replacement-password-123",
+                },
+                extra_headers=shared_headers,
+            )
+            for _ in range(server.RECOVERY_LIMIT)
+        ]
+        self.assertEqual(responses[-1][0], 429)
+        status, payload, _ = TestClient(self.base_url).login(
+            ADMIN_USERNAME, ADMIN_PASSWORD, extra_headers=shared_headers
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertGreater(server.RECOVERY_SOURCE_LIMIT, server.RECOVERY_LIMIT)
 
     def test_13_frontend_contract(self):
         """Keep responsive, themed, versioned, and attributed shell requirements."""
@@ -1571,6 +1638,46 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn("one approved PNG", html)
         self.assertIn("navigator.clipboard.writeText", script)
         self.assertIn("structuredClone(editingShots)", script)
+    def test_13a_auth_setup_and_attachment_layout_contract(self):
+        """Keep auth states and prompt actions separate across responsive layouts."""
+        client = TestClient(self.base_url)
+        html = client.request("/")[1]
+        css = client.request("/style.css")[1]
+        script = client.request("/app.js")[1]
+
+        panel_start = html.index('<div class="auth-panel"')
+        panel_end = html.index("</div>", panel_start)
+        self.assertGreater(panel_start, html.index('class="auth-intro"'))
+        self.assertGreater(html.index('id="loginForm"'), panel_start)
+        self.assertGreater(html.index('id="authHelpers"'), panel_start)
+        self.assertGreater(html.index('id="showRegister"'), panel_start)
+        self.assertGreater(html.index('id="showRecovery"'), panel_start)
+        self.assertLess(panel_start, panel_end)
+        self.assertIn("function renderAuthView(view, focusTarget)", script)
+        self.assertIn('renderAuthView("register", "registerName")', script)
+        self.assertIn('renderAuthView("recovery", "recoveryUsername")', script)
+        self.assertGreaterEqual(
+            script.count('renderAuthView("login", "loginUsername")'), 3
+        )
+        self.assertIn(
+            'byId("showRegister").classList.toggle("hidden", !registrationEnabled)',
+            script,
+        )
+        self.assertIn(".auth-helper-row", css)
+        self.assertIn("#securitySetup", css)
+        self.assertIn("padding-block:", css)
+
+        self.assertIn('class="attachment-list" id="promptAttachmentList"', html)
+        self.assertIn('class="prompt-attachment"', script)
+        self.assertIn('class="prompt-attachment-meta"', script)
+        self.assertIn('class="prompt-attachment-actions"', script)
+        self.assertIn(">Download<", script)
+        self.assertIn(">Delete attachment<", script)
+        self.assertIn("overflow-wrap: anywhere", css)
+        self.assertIn(".prompt-attachment-actions", css)
+        self.assertIn("@media (max-width: 520px)", css)
+        self.assertIn("grid-template-columns: minmax(0, 1fr)", css)
+
     def reset_regular_users(self):
         """Remove prior test accounts while retaining the initial administrator."""
         with sqlite3.connect(self.database_path) as database:
@@ -2880,9 +2987,10 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(second_session.login("recoverable", "initial-password-123")[0], 200)
         recovered = TestClient(self.base_url).request(
             "/api/recover", method="POST",
-            payload={"username": "recoverable", "recoveryCode": generated["codes"][0], "newPassword": "recovered-password-123"},
+            payload={"username": "recoverable", "recoveryCode": generated["codes"][1], "newPassword": "recovered-password-123"},
         )
         self.assertEqual(recovered[0], 200)
+        self.assertTrue(recovered[1]["ok"])
         self.assertEqual(client.request("/api/session")[1]["authenticated"], False)
         self.assertEqual(second_session.request("/api/session")[1]["authenticated"], False)
         replay = TestClient(self.base_url).request(
@@ -2890,8 +2998,183 @@ class ServerIntegrationTests(unittest.TestCase):
             payload={"username": "missing-account", "recoveryCode": generated["codes"][0], "newPassword": "another-password-123"},
         )
         self.assertEqual(replay[0], 200)
-        self.assertEqual(replay[1]["message"], recovered[1]["message"])
+        self.assertFalse(replay[1]["ok"])
+        self.assertNotEqual(replay[1]["message"], recovered[1]["message"])
         self.assertEqual(TestClient(self.base_url).login("recoverable", "recovered-password-123")[0], 200)
+
+    def test_21a_recovery_codes_are_single_use_under_replay(self):
+        """Consume setup and recovery codes once, including concurrent replay."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        client = TestClient(self.base_url)
+        self.assertEqual(client.register(
+            "single-use", "Single Use", "single-use-password",
+            complete_setup=False,
+        )[0], 201)
+        generated = client.request(
+            "/api/account/recovery-codes/generate",
+            method="POST", payload={},
+        )[1]
+        confirmed = client.request(
+            "/api/account/recovery-codes/confirm", method="POST",
+            payload={
+                "setId": generated["setId"],
+                "recoveryCode": generated["codes"][0],
+            },
+        )
+        self.assertEqual(confirmed[0], 200)
+
+        setup_replay = TestClient(self.base_url).request(
+            "/api/recover", method="POST",
+            payload={
+                "username": "single-use",
+                "recoveryCode": generated["codes"][0],
+                "newPassword": "setup-replay-password",
+            },
+        )
+        self.assertEqual(setup_replay[0], 200)
+        self.assertFalse(setup_replay[1]["ok"])
+        self.assertEqual(
+            TestClient(self.base_url).login(
+                "single-use", "setup-replay-password"
+            )[0],
+            401,
+        )
+        second_session = TestClient(self.base_url)
+        self.assertEqual(second_session.login(
+            "single-use", "single-use-password"
+        )[0], 200)
+
+        with sqlite3.connect(self.database_path) as database:
+            now = int(time.time())
+            user_id = database.execute(
+                "SELECT id FROM users WHERE username='single-use'"
+            ).fetchone()[0]
+            database.execute(
+                """
+                INSERT INTO mcp_permissions
+                    (user_id, enabled, can_read, can_write, can_archive,
+                     can_delete, updated_at)
+                VALUES (?, 1, 1, 0, 0, 0, ?)
+                """,
+                (user_id, now),
+            )
+            database.execute(
+                "INSERT INTO oauth_clients VALUES ('recovery-client', 'Recovery client', '[]', ?)",
+                (now,),
+            )
+            grant_id = database.execute(
+                """
+                INSERT INTO oauth_grants
+                    (user_id, client_id, scopes, created_at)
+                VALUES (?, 'recovery-client', 'aics.read', ?)
+                """,
+                (user_id, now),
+            ).lastrowid
+            raw_token = "recovery-token-" + secrets.token_urlsafe(40)
+            database.execute(
+                """
+                INSERT INTO oauth_tokens
+                    (token_hash, grant_id, token_type, family_id, created_at,
+                     expires_at, scopes)
+                VALUES (?, ?, 'access', 'recovery-family', ?, ?, 'aics.read')
+                """,
+                (server.token_hash(raw_token), grant_id, now, now + 3600),
+            )
+
+        success = TestClient(self.base_url).request(
+            "/api/recover", method="POST",
+            payload={
+                "username": "single-use",
+                "recoveryCode": generated["codes"][1],
+                "newPassword": "first-recovered-password",
+            },
+        )
+        self.assertTrue(success[1]["ok"])
+        self.assertIn("Password changed", success[1]["message"])
+        self.assertEqual(client.request("/api/session")[1]["authenticated"], False)
+        self.assertEqual(
+            second_session.request("/api/session")[1]["authenticated"], False
+        )
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            self.assertIsNone(server.resolve_access_token(raw_token))
+        self.assertEqual(TestClient(self.base_url).login(
+            "single-use", "single-use-password"
+        )[0], 401)
+        self.assertEqual(TestClient(self.base_url).login(
+            "single-use", "first-recovered-password"
+        )[0], 200)
+
+        replay = TestClient(self.base_url).request(
+            "/api/recover", method="POST",
+            payload={
+                "username": "single-use",
+                "recoveryCode": generated["codes"][1],
+                "newPassword": "replayed-password",
+            },
+        )
+        self.assertFalse(replay[1]["ok"])
+        self.assertEqual(TestClient(self.base_url).login(
+            "single-use", "replayed-password"
+        )[0], 401)
+        self.assertEqual(TestClient(self.base_url).login(
+            "single-use", "first-recovered-password"
+        )[0], 200)
+
+        passwords = ("concurrent-password-one", "concurrent-password-two")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    TestClient(self.base_url).request,
+                    "/api/recover",
+                    method="POST",
+                    payload={
+                        "username": "single-use",
+                        "recoveryCode": generated["codes"][2],
+                        "newPassword": password,
+                    },
+                )
+                for password in passwords
+            ]
+            results = [future.result(timeout=20) for future in futures]
+        winners = [
+            password for password, result in zip(passwords, results)
+            if result[1]["ok"]
+        ]
+        self.assertEqual(len(winners), 1)
+        with sqlite3.connect(self.database_path) as database:
+            database.execute("DELETE FROM login_attempts")
+        loser = next(password for password in passwords if password != winners[0])
+        self.assertEqual(TestClient(self.base_url).login(
+            "single-use", winners[0]
+        )[0], 200)
+        self.assertEqual(TestClient(self.base_url).login(
+            "single-use", loser
+        )[0], 401)
+        self.assertEqual(TestClient(self.base_url).login(
+            "single-use", "first-recovered-password"
+        )[0], 401)
+
+        public_failures = [
+            replay,
+            TestClient(self.base_url).request(
+                "/api/recover", method="POST",
+                payload={
+                    "username": "unknown-user",
+                    "recoveryCode": "INVALID",
+                    "newPassword": "unknown-user-password",
+                },
+            ),
+            TestClient(self.base_url).request(
+                "/api/recover", method="POST", payload={}
+            ),
+        ]
+        expected_keys = set(public_failures[0][1])
+        for response in public_failures:
+            self.assertEqual(response[0], 200)
+            self.assertEqual(set(response[1]), expected_keys)
+            self.assertFalse(response[1]["ok"])
+            self.assertEqual(response[1]["message"], replay[1]["message"])
 
     def test_21b_setup_flags_block_direct_api_bypasses(self):
         """Permit only the required setup sequence for incomplete sessions."""
@@ -3076,6 +3359,22 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn(
             "filename*=UTF-8''r%C3%A9sum%C3%A9.md",
             unicode_download[2]["Content-Disposition"],
+        )
+        pdf_names = ["reference.pdf", ("long-reference-name-" * 8) + ".pdf"]
+        for pdf_name in pdf_names:
+            pdf_upload = owner.request(
+                path, method="PUT", raw_body=b"%PDF-1.4\n%%EOF\n",
+                extra_headers={
+                    "Content-Type": "application/pdf",
+                    "X-File-Name": urllib.parse.quote(pdf_name),
+                },
+            )
+            self.assertEqual(pdf_upload[0], 201, pdf_upload[1])
+        listed = owner.request(path)
+        self.assertEqual(listed[0], 200)
+        self.assertEqual(
+            {item["filename"] for item in listed[1]["attachments"]},
+            {unicode_name, *pdf_names},
         )
         uploaded = owner.request(
             path, method="PUT", raw_body=b"private markdown\n",

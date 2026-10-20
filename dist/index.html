@@ -39,18 +39,35 @@
         <p>Sign in to your private projects, episodes, characters, and production notes.</p>
       </div>
 
-      <form id="loginForm" class="auth-form">
-        <label class="field">Username
-          <input id="loginUsername" type="text" name="username" autocomplete="username" required maxlength="40">
-        </label>
-        <label class="field">Password
-          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required maxlength="256">
-        </label>
-        <p class="form-status" id="loginStatus" role="status" aria-live="polite"></p>
-        <button class="btn primary wide" type="submit">Sign in</button>
-      </form>
+      <div class="auth-panel">
+        <form id="loginForm" class="auth-form">
+          <label class="field">Username
+            <input id="loginUsername" type="text" name="username" autocomplete="username" required maxlength="40">
+          </label>
+          <label class="field">Password
+            <input id="loginPassword" name="password" type="password" autocomplete="current-password" required maxlength="256">
+          </label>
+          <p class="form-status" id="loginStatus" role="status" aria-live="polite"></p>
+          <button class="btn primary wide" type="submit">Sign in</button>
+        </form>
 
-        <button class="text-btn" id="showRecovery" type="button">Forgot password?</button>
+        <div class="auth-helper-row" id="authHelpers">
+          <button class="text-btn hidden" id="showRegister" type="button">Create an account</button>
+          <button class="text-btn" id="showRecovery" type="button">Forgot password?</button>
+        </div>
+
+        <form id="registerForm" class="auth-form hidden" aria-labelledby="registerTitle">
+          <div class="form-heading">
+            <div><div class="eyebrow">Registration</div><h2 id="registerTitle">Create your private workspace</h2></div>
+            <button class="icon-btn" id="hideRegister" type="button" aria-label="Return to sign in">×</button>
+          </div>
+          <label class="field">Display name<input id="registerName" type="text" name="displayName" autocomplete="name" required maxlength="80"></label>
+          <label class="field">Username<input id="registerUsername" type="text" name="username" autocomplete="username" required minlength="3" maxlength="40" pattern="[A-Za-z0-9_.-]+"></label>
+          <label class="field">Password<input id="registerPassword" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256"></label>
+          <p class="field-help">Use at least 12 characters. New accounts are always regular users.</p>
+          <p class="form-status" id="registerStatus" role="status" aria-live="polite"></p>
+          <button class="btn primary wide" type="submit">Create account</button>
+        </form>
 
         <form id="recoveryForm" class="auth-form hidden" aria-labelledby="recoveryTitle">
           <div class="form-heading"><div><div class="eyebrow">No email required</div><h2 id="recoveryTitle">Recover your account</h2></div><button class="icon-btn" id="hideRecovery" type="button" aria-label="Return to sign in">×</button></div>
@@ -60,10 +77,12 @@
           <p class="field-help" id="recoverySupport">Responses do not reveal whether an account exists. If you have no valid code, contact the site administrator.</p>
           <p class="form-status" id="recoveryStatus" role="status" aria-live="polite"></p>
           <button class="btn primary wide" type="submit">Reset password</button>
+          <button class="btn wide hidden" id="recoverySignIn" type="button">Return to Sign in</button>
         </form>
 
         <section id="securitySetup" class="auth-form hidden" aria-labelledby="securitySetupTitle">
-          <div class="eyebrow">Required security setup</div><h2 id="securitySetupTitle">Secure your account</h2>
+          <div class="eyebrow">Required security setup</div>
+          <h2 id="securitySetupTitle">Secure your account</h2>
           <form id="forcedPasswordForm" class="hidden">
             <p>Your temporary password must be replaced before entering the dashboard.</p>
             <label class="field">Temporary password<input id="forcedCurrentPassword" type="password" autocomplete="current-password" maxlength="256"></label>
@@ -78,32 +97,7 @@
           </div>
           <p class="form-status" id="securitySetupStatus" role="status" aria-live="polite"></p>
         </section>
-      <div id="registrationPrompt" class="auth-switch hidden">
-        <span>New to the studio?</span>
-        <button class="text-btn" id="showRegister" type="button">Create an account</button>
       </div>
-
-      <form id="registerForm" class="auth-form hidden" aria-labelledby="registerTitle">
-        <div class="form-heading">
-          <div>
-            <div class="eyebrow">Registration</div>
-            <h2 id="registerTitle">Create your private workspace</h2>
-          </div>
-          <button class="icon-btn" id="hideRegister" type="button" aria-label="Return to sign in">×</button>
-        </div>
-        <label class="field">Display name
-          <input id="registerName" type="text" name="displayName" autocomplete="name" required maxlength="80">
-        </label>
-        <label class="field">Username
-          <input id="registerUsername" type="text" name="username" autocomplete="username" required minlength="3" maxlength="40" pattern="[A-Za-z0-9_.-]+">
-        </label>
-        <label class="field">Password
-          <input id="registerPassword" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
-        </label>
-        <p class="field-help">Use at least 12 characters. New accounts are always regular users.</p>
-        <p class="form-status" id="registerStatus" role="status" aria-live="polite"></p>
-        <button class="btn primary wide" type="submit">Create account</button>
-      </form>
     </div>
   </section>
 
@@ -424,7 +418,7 @@
       <label class="field">Optional source notes<textarea id="promptSourceNotes" class="textarea-medium" maxlength="20000"></textarea></label>
       <label class="field">Optional model / settings<textarea id="promptSettings" class="textarea-short" maxlength="5000"></textarea></label>
       <label class="field">Private attachments<input id="promptAttachments" type="file" multiple accept=".pdf,.docx,.md,.markdown,.txt,image/png,image/jpeg,image/webp"><span class="field-help">PDF, DOCX, Markdown, text, PNG, JPEG, or WebP. Maximum 20 MB each, 20 files and 100 MB per prompt. PDF and DOCX text is not extracted.</span></label>
-      <div class="stack" id="promptAttachmentList"></div>
+      <div class="attachment-list" id="promptAttachmentList"></div>
       <div class="modalactions"><button class="btn danger hidden" id="deletePrompt" type="button">Delete prompt</button><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Save prompt</button></div>
     </form>
   </dialog>

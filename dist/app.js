@@ -13,6 +13,8 @@
   var editingShots = [];
   var expiryTimer = null;
   var toolRecords = [];
+  var registrationEnabled = false;
+  var authViewState = "login";
   var statuses = [
     "Script draft", "60s script ready", "References approved",
     "Assets generated", "Editing", "Ready for review", "Approved", "Published"
@@ -36,7 +38,6 @@
       return "";
     }
   }
-
 
   /** Render a conservative Markdown subset after escaping all raw HTML. */
   function renderMarkdown(value) {
@@ -65,13 +66,35 @@
     byId("confirmRecoveryCode").focus();
   }
 
+
+  /** Render exactly one authentication state and its valid helper controls. */
+  function renderAuthView(view, focusTarget) {
+    var views = ["login", "register", "recovery", "security"];
+    var elements = {login: "loginForm", register: "registerForm", recovery: "recoveryForm", security: "securitySetup"};
+    authViewState = views.includes(view) ? view : "login";
+    views.forEach(function (name) {
+      byId(elements[name]).classList.toggle("hidden", name !== authViewState);
+    });
+    byId("authHelpers").classList.toggle("hidden", authViewState !== "login");
+    byId("showRegister").classList.toggle("hidden", !registrationEnabled);
+    if (authViewState !== "register") {
+      setStatus(byId("registerStatus"), "", "");
+    }
+    if (authViewState !== "recovery") {
+      byId("recoverySignIn").classList.add("hidden");
+      setStatus(byId("recoveryStatus"), "", "");
+    }
+    if (focusTarget) {
+      window.requestAnimationFrame(function () { byId(focusTarget).focus(); });
+    }
+  }
+
   function showSecuritySetup(payload, regeneration) {
     session = payload;
     dismissBootstrap();
     byId("appView").classList.add("hidden");
     byId("authView").classList.remove("hidden");
-    ["loginForm", "registerForm", "registrationPrompt", "showRecovery", "recoveryForm"].forEach(function (id) { byId(id).classList.add("hidden"); });
-    byId("securitySetup").classList.remove("hidden");
+    renderAuthView("security", session.user.mustChangePassword ? "forcedCurrentPassword" : "generateRecoveryCodes");
     byId("forcedPasswordForm").classList.toggle("hidden", !session.user.mustChangePassword);
     byId("recoverySetupFlow").classList.toggle("hidden", session.user.mustChangePassword);
     byId("setupPasswordWrap").classList.toggle("hidden", !regeneration);
@@ -92,7 +115,7 @@
       var path = "/api/projects/" + encodeURIComponent(project.id) + "/prompts/" + encodeURIComponent(prompt.id) + "/attachments";
       var attachments = (await api(path)).attachments;
       byId("promptAttachmentList").innerHTML = attachments.length ? attachments.map(function (item) {
-        return '<article class="gate-row" data-attachment-id="' + item.id + '"><div><strong>' + escapeHtml(item.filename) + '</strong><p class="muted">' + escapeHtml(item.mimeType) + " · " + Math.ceil(item.byteSize / 1024) + ' KB</p></div><a class="btn" href="' + path + "/" + item.id + '" target="_blank" rel="noopener">Download</a><button class="btn danger" data-delete-attachment type="button">Delete</button></article>';
+        return '<article class="prompt-attachment" data-attachment-id="' + item.id + '"><div class="prompt-attachment-meta"><strong>' + escapeHtml(item.filename) + '</strong><p class="muted">' + escapeHtml(item.mimeType) + " · " + Math.ceil(item.byteSize / 1024) + ' KB</p></div><div class="prompt-attachment-actions"><a class="btn" href="' + path + "/" + item.id + '" target="_blank" rel="noopener">Download</a><button class="btn danger" data-delete-attachment type="button">Delete attachment</button></div></article>';
       }).join("") : '<div class="card empty"><p>No private attachments.</p></div>';
     } catch (error) { byId("promptAttachmentList").innerHTML = '<div class="notice">' + escapeHtml(error.message) + "</div>"; }
   }
@@ -241,13 +264,7 @@
     byId("authView").classList.remove("hidden");
     byId("loginPassword").value = "";
     setStatus(byId("loginStatus"), message || "", message ? "error" : "");
-    byId("registrationPrompt").classList.toggle("hidden", !byId("registrationPrompt").dataset.enabled);
-    byId("showRecovery").classList.remove("hidden");
-    byId("securitySetup").classList.add("hidden");
-    byId("recoveryForm").classList.add("hidden");
-    byId("registerForm").classList.add("hidden");
-    byId("loginForm").classList.remove("hidden");
-    byId("loginUsername").focus();
+    renderAuthView("login", "loginUsername");
   }
 
   function populateAccount() {
@@ -627,7 +644,7 @@
     try {
       payload = await api("/api/session");
       updateFooter(payload);
-      byId("registrationPrompt").dataset.enabled = payload.registrationEnabled ? "true" : "";
+      registrationEnabled = Boolean(payload.registrationEnabled);
       if (payload.authenticated) { await showAuthenticated(payload, false); return; }
     } catch (error) {
       updateFooter({appName: "AI Content Studio", version: ""});
@@ -645,15 +662,17 @@
 
   byId("loginThemeToggle").addEventListener("click", toggleTheme);
   byId("themeToggle").addEventListener("click", toggleTheme);
-  byId("showRegister").addEventListener("click", function () { byId("loginForm").classList.add("hidden"); byId("registrationPrompt").classList.add("hidden"); byId("registerForm").classList.remove("hidden"); byId("registerName").focus(); });
-  byId("hideRegister").addEventListener("click", function () { byId("registerForm").classList.add("hidden"); byId("loginForm").classList.remove("hidden"); byId("registrationPrompt").classList.remove("hidden"); byId("loginUsername").focus(); });
-  byId("showRecovery").addEventListener("click", function () { byId("loginForm").classList.add("hidden"); byId("registrationPrompt").classList.add("hidden"); byId("showRecovery").classList.add("hidden"); byId("recoveryForm").classList.remove("hidden"); byId("recoveryUsername").focus(); });
-  byId("hideRecovery").addEventListener("click", function () { byId("recoveryForm").classList.add("hidden"); byId("loginForm").classList.remove("hidden"); byId("showRecovery").classList.remove("hidden"); byId("loginUsername").focus(); });
+  byId("showRegister").addEventListener("click", function () { renderAuthView("register", "registerName"); });
+  byId("hideRegister").addEventListener("click", function () { byId("registerForm").reset(); setStatus(byId("loginStatus"), "", ""); renderAuthView("login", "loginUsername"); });
+  byId("showRecovery").addEventListener("click", function () { renderAuthView("recovery", "recoveryUsername"); });
+  byId("hideRecovery").addEventListener("click", function () { byId("recoveryForm").reset(); setStatus(byId("loginStatus"), "", ""); renderAuthView("login", "loginUsername"); });
+  byId("recoverySignIn").addEventListener("click", function () { setStatus(byId("loginStatus"), "", ""); renderAuthView("login", "loginUsername"); });
   byId("recoveryForm").addEventListener("submit", async function (event) {
     event.preventDefault();
     try {
       var result = await api("/api/recover", {method: "POST", body: {username: byId("recoveryUsername").value.trim(), recoveryCode: byId("recoveryCode").value.trim(), newPassword: byId("recoveryPassword").value}});
-      setStatus(byId("recoveryStatus"), result.message, "success");
+      setStatus(byId("recoveryStatus"), result.message, result.ok ? "success" : "error");
+      byId("recoverySignIn").classList.toggle("hidden", !result.ok);
       if (result.contactPageUrl) { byId("recoverySupport").innerHTML = 'If you have no valid code, use the configured <a href="' + escapeHtml(safeLink(result.contactPageUrl)) + '" target="_blank" rel="noopener noreferrer">Contact page</a>.'; }
       byId("recoveryForm").reset();
     } catch (error) { setStatus(byId("recoveryStatus"), error.message, "error"); }
@@ -873,7 +892,7 @@
       setStatus(byId("integrationStatus"), error.message, "error");
     }
   });
-  byId("registrationSettingsForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/admin/settings", {method: "PUT", body: {registrationEnabled: byId("registrationEnabled").checked, contactPageUrl: byId("contactPageUrl").value.trim()}}); byId("registrationPrompt").dataset.enabled = result.registrationEnabled ? "true" : ""; setStatus(byId("adminSettingsStatus"), "Settings saved.", "success"); } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); } });
+  byId("registrationSettingsForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/admin/settings", {method: "PUT", body: {registrationEnabled: byId("registrationEnabled").checked, contactPageUrl: byId("contactPageUrl").value.trim()}}); registrationEnabled = Boolean(result.registrationEnabled); setStatus(byId("adminSettingsStatus"), "Settings saved.", "success"); } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); } });
   byId("userList").addEventListener("click", async function (event) {
     var button = event.target.closest("[data-user-action]"); if (!button) { return; }
     var row = button.closest("[data-user-row]"); var action = button.dataset.userAction;

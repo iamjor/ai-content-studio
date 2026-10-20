@@ -45,6 +45,8 @@ The first v0.3 start records schema version 5 and additively creates OAuth clien
 
 The first v0.4 start records schema version 6 and additively adds recovery-code hashes, forced-setup flags, minimal security events, prompt attachment metadata, tool ownership and assignments, and MCP entitlements. Existing users, projects, episodes, characters, scripts, images, prompt text and snapshots, tools, OAuth clients and grants, tokens, sessions, revisions, IDs, and archive state are preserved. Existing administrator tools remain visible to administrators and are hidden from regular users until explicitly assigned. Existing administrators retain MCP access. Existing users without confirmed recovery codes are directed through setup after their next browser login. Back up SQLite, `/data/images`, and `/data/prompt-attachments` together before upgrade.
 
+The v0.4.1 hotfix keeps schema version 6 and requires no new data migration. Upgrade by replacing the application image while preserving the existing volume. Existing accounts, workspaces, recovery sets, attachments, tools, MCP permissions, grants, and tokens remain in place. The hotfix changes recovery consumption, authentication throttles, and browser layout only. Take the normal complete backup before upgrade, then verify login, recovery setup, one-use recovery, attachment downloads, and MCP readiness.
+
 The v0.3 image installs the hash-locked official MCP SDK dependency set from `requirements.txt`; `requirements.in` records the direct SDK pin and starts a loopback-only MCP worker behind the existing public service. No external database, paid API, or production OAuth client is required.
 
 ## 4. Production rollout

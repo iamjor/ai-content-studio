@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.4.1 - 2026-10-20
+
+- Fixed login, registration, password recovery, and required security setup layout so one explicit authentication view is visible at a time on desktop and mobile.
+- Made recovery setup confirmation consume its submitted code and made public password recovery atomic under concurrent replay.
+- Kept recovery failure responses generic while providing an explicit success response, revoking sessions and OAuth access after a successful reset.
+- Split login and recovery throttles into hashed normalized-account, account-and-source, and higher-ceiling source scopes with bounded storage and retry guidance.
+- Hardened attachment filenames against decoded control characters while retaining safe Unicode downloads.
+- Separated prompt attachment metadata from responsive Download and Delete attachment actions, including long names and multiple files.
+
 ## 0.4.0 - 2026-10-20
 
 - Added administrator-assisted password reset with one-time temporary-password display, optional forced change, session and OAuth revocation, recovery-code invalidation, and minimal secret-free security events.
