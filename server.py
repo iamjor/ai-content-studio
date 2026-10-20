@@ -12,6 +12,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import sys
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,6 +50,18 @@ DEFAULT_CONTENT_SECURITY_POLICY = (
     "form-action 'self'; frame-ancestors 'none'"
 )
 MCP_INTERNAL_PORT = int(os.environ.get("AICS_MCP_INTERNAL_PORT", "8788"))
+MCP_DIAGNOSTICS = os.environ.get("AICS_MCP_DIAGNOSTICS", "") == "1"
+MCP_FORWARDED_HEADERS = (
+    "Authorization",
+    "Accept",
+    "Content-Type",
+    "MCP-Protocol-Version",
+    "Mcp-Session-Id",
+    "Last-Event-ID",
+)
+MCP_SAFE_METHOD_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_./-]{0,127}")
+MCP_SAFE_VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+MCP_DIAGNOSTIC_ERROR_LIMIT = 1_024
 PUBLIC_BASE_URL = os.environ.get(
     "AICS_PUBLIC_BASE_URL", "http://127.0.0.1:8787"
 ).rstrip("/")
@@ -119,6 +132,137 @@ def parse_trusted_proxy_networks(value):
 TRUSTED_PROXY_NETWORKS = parse_trusted_proxy_networks(
     os.environ.get("AICS_TRUSTED_PROXY_NETWORKS", "")
 )
+
+
+def parse_mcp_diagnostic_request(body):
+    """Return safe protocol metadata and values that error text must redact."""
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, ValueError, TypeError, RecursionError):
+        return None, None, ()
+    if not isinstance(payload, dict):
+        return None, None, ()
+
+    raw_method = payload.get("method")
+    method = (
+        raw_method
+        if isinstance(raw_method, str)
+        and MCP_SAFE_METHOD_PATTERN.fullmatch(raw_method)
+        else None
+    )
+    raw_version = None
+    params = payload.get("params")
+    if method == "initialize" and isinstance(params, dict):
+        raw_version = params.get("protocolVersion")
+    protocol_version = (
+        raw_version
+        if isinstance(raw_version, str)
+        and MCP_SAFE_VERSION_PATTERN.fullmatch(raw_version)
+        else None
+    )
+
+    sensitive = []
+    pending = [(payload, ())]
+    while pending:
+        value, path = pending.pop()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                pending.append((item, path + (str(key),)))
+        elif isinstance(value, list):
+            for item in value:
+                pending.append((item, path))
+        elif isinstance(value, str) and value:
+            approved = path == ("method",) or (
+                method == "initialize" and path == ("params", "protocolVersion")
+            )
+            if not approved:
+                sensitive.append(value)
+        elif path and path[0] == "params" and isinstance(value, (int, float)):
+            sensitive.append(str(value))
+    return method, protocol_version, tuple(sensitive)
+
+
+def sanitize_mcp_diagnostic_text(value, sensitive_values, limit):
+    """Bound one internal error field and remove request-derived secrets."""
+    if not isinstance(value, str):
+        return None
+    text = "".join(
+        character if 32 <= ord(character) <= 126 else " "
+        for character in value
+    )
+    text = " ".join(text.split())
+    for sensitive in sorted(set(sensitive_values), key=len, reverse=True):
+        if sensitive:
+            text = text.replace(sensitive, "[redacted]")
+    text = re.sub(
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+",
+        "Bearer [redacted]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(authorization|cookie|access[_ -]?token|refresh[_ -]?token|"
+        r"oauth[_ -]?code|state|code[_ -]?verifier|code[_ -]?challenge|pkce)"
+        r"\b\s*[:=]\s*(?:\"[^\"]*\"|[^\s,;}]+)",
+        r"\1=[redacted]",
+        text,
+    )
+    return text[:limit]
+
+
+def log_mcp_internal_error(headers, body, status, response_body):
+    """Emit opt-in MCP failure metadata without request or workspace content."""
+    if not MCP_DIAGNOSTICS or status < 400:
+        return
+    method, protocol_version, sensitive_values = parse_mcp_diagnostic_request(body)
+    # Header values are never approved diagnostic fields. Retain them only long
+    # enough to redact any value reflected by the internal transport error.
+    for name in MCP_FORWARDED_HEADERS + ("Cookie",):
+        value = headers.get(name, "")
+        if value:
+            sensitive_values += (value,)
+            if name == "Authorization" and value.startswith("Bearer "):
+                sensitive_values += (value[7:],)
+
+    error_code = None
+    error_message = None
+    try:
+        payload = json.loads(response_body)
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            raw_code = error.get("code")
+            if isinstance(raw_code, int) and not isinstance(raw_code, bool):
+                error_code = str(raw_code)
+            elif isinstance(raw_code, str):
+                error_code = sanitize_mcp_diagnostic_text(
+                    raw_code, sensitive_values, 64
+                )
+            remaining = MCP_DIAGNOSTIC_ERROR_LIMIT - len(error_code or "")
+            error_message = sanitize_mcp_diagnostic_text(
+                error.get("message"), sensitive_values, max(0, remaining)
+            )
+    except (UnicodeDecodeError, ValueError, TypeError, RecursionError):
+        pass
+
+    diagnostic = {
+        "correlation_id": secrets.token_hex(16),
+        "status": status,
+        "accept_present": bool(headers.get("Accept")),
+        "content_type_present": bool(headers.get("Content-Type")),
+        "mcp_protocol_version_present": bool(
+            headers.get("MCP-Protocol-Version")
+        ),
+        "mcp_session_id_present": bool(headers.get("Mcp-Session-Id")),
+        "request_body_bytes": len(body),
+    }
+    if method is not None:
+        diagnostic["jsonrpc_method"] = method
+    if protocol_version is not None:
+        diagnostic["initialize_protocol_version"] = protocol_version
+    if error_code is not None:
+        diagnostic["error_code"] = error_code
+    if error_message is not None:
+        diagnostic["error_message"] = error_message
+    print("MCP diagnostic " + json.dumps(diagnostic, sort_keys=True), file=sys.stderr)
 
 
 def connect():
@@ -1825,10 +1969,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self.json_reply(413, {"error": "MCP request is too large."})
         forwarded = {}
-        for name in (
-            "Authorization", "Accept", "Content-Type", "MCP-Protocol-Version",
-            "Mcp-Session-Id", "Last-Event-ID",
-        ):
+        for name in MCP_FORWARDED_HEADERS:
             value = self.headers.get(name)
             if value:
                 forwarded[name] = value
@@ -1855,6 +1996,9 @@ class Handler(BaseHTTPRequestHandler):
                 "Content-Type", "application/json; charset=utf-8"
             )
             connection.close()
+            log_mcp_internal_error(
+                self.headers, body, status, response_body
+            )
             return self.reply(
                 status, response_body, content_type, response_headers
             )

@@ -87,3 +87,15 @@ Carry out these steps only on an installation you administer.
 - [ ] Repeat health, authentication, HTTPS, and data checks.
 
 Keep hostnames, addresses, credentials, policies, and topology in a private operations record.
+
+## Temporary MCP initialization diagnostics
+
+Use this procedure only while investigating a failed authenticated MCP initialization. The setting is disabled by default and does not change OAuth clients, tokens, scopes, or workspace data.
+
+1. Set `AICS_MCP_DIAGNOSTICS=1` in the private deployment environment.
+2. Restart the AI Content Studio container so the setting takes effect.
+3. Trigger ChatGPT Refresh tools once.
+4. Inspect the container logs for the generated `MCP diagnostic` correlation ID and bounded transport metadata. Do not publish deployment logs.
+5. Set `AICS_MCP_DIAGNOSTICS=0` or remove the variable, then restart the container.
+
+The diagnostic reports only the internal response status, safe JSON-RPC method and initialize protocol version when parseable, required header presence, request byte length, and a bounded sanitized JSON-RPC error code and message. It never intentionally records authorization values, cookies, OAuth credentials, tool arguments, full bodies, or workspace content.
