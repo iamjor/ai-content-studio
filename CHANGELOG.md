@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-10-20
+
+- Added administrator-assisted password reset with one-time temporary-password display, optional forced change, session and OAuth revocation, recovery-code invalidation, and minimal secret-free security events.
+- Added mandatory eight-code recovery setup, generic no-email password recovery, single-use salted code hashes, source and account throttling, replay protection, and authenticated regeneration.
+- Added a validated administrator-configured public Contact page URL for users without a valid code.
+- Expanded project prompts to 120,000-character raw Markdown with sanitized preview, HTTPS source metadata, and private project-scoped attachments.
+- Added PDF, DOCX, Markdown, text, PNG, JPEG, and WebP signature validation with 20 MB per-file, 20-file, and 100 MB per-prompt limits.
+- Added user-owned private tools, hidden-by-default administrator tools, explicit per-user assignments, and backend-enforced view-and-use-only access.
+- Added independent MCP enabled, read, write, archive/restore, and permanent-delete permissions with immediate token invalidation after reductions.
+- Added schema version 6 additive migration, v0.4.0 security and isolation tests, and complete-volume backup guidance.
+
 ## 0.3.0 - 2026-10-19
 
 - Added an OAuth 2.1 authorization-code flow with S256 PKCE, discovery metadata, exact redirect validation, short access tokens, rotating refresh tokens, and revocation.

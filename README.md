@@ -8,22 +8,22 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-60a5fa.svg"></a>
-  <img alt="Version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-60a5fa.svg">
+  <img alt="Version 0.4.0" src="https://img.shields.io/badge/version-0.4.0-60a5fa.svg">
   <img alt="Python 3.13" src="https://img.shields.io/badge/Python-3.13-3776AB.svg">
 </p>
 
-AI Content Studio organizes project Bibles, episodes, shot plans, characters, reusable prompts, production gates, private reference images, and a shared tools catalog. Each account has a private workspace. Administrators control registration, account lifecycle, and the catalog.
+AI Content Studio organizes project Bibles, episodes, shot plans, characters, long-form prompt libraries with private attachments, production gates, and an account-scoped tool catalog. Each account has a private workspace. Administrators control registration, account recovery, tool assignments, and granular MCP access.
 
 ## Features
 
 - Private per-user projects, episodes, characters, workflow notes, and reference images
 - Editable project Bibles, episode synopses and beats, and reorderable shot plans
-- Project-scoped prompt libraries with stable shot prompt snapshots
+- Long-form Markdown prompt libraries with sanitized preview, HTTPS sources, private attachments, and stable shot snapshots
 - Character reference requirements, continuity locks, and manual production gates
 - Archive, restore, and confirmed deletion flows
 - Remote Streamable HTTP MCP access with OAuth 2.1, PKCE, narrow scopes, and revision-safe writes
 - Account-visible connected integrations with explicit token revocation
-- Administrator-managed users, registration policy, and shared tools
+- Administrator-assisted reset, no-email recovery codes, Contact page settings, per-user tool assignments, and granular MCP grants
 - Password hashing, server-side sessions, CSRF checks, and bounded authentication attempts
 - Responsive dark and light themes with accessible navigation
 - Text-only JSON workspace transfer and volume-level complete backup
@@ -44,7 +44,7 @@ The packaged runtime uses Python 3.13, SQLite, dependency-free HTML, CSS, and Ja
 7. Put the loopback-bound service behind an HTTPS reverse proxy that preserves the public Host header.
 8. After the administrator exists, remove the bootstrap password from `.env` and recreate the container.
 
-The named `studio_data` volume stores `/data/studio.sqlite3` and `/data/images`. Never run `docker compose down -v` unless permanent deletion is intentional. Read the complete [deployment and upgrade guide](docs/DEPLOYMENT.md) before changing an existing installation.
+The named `studio_data` volume stores `/data/studio.sqlite3`, `/data/images`, and `/data/prompt-attachments`. Never run `docker compose down -v` unless permanent deletion is intentional. Read the complete [deployment and upgrade guide](docs/DEPLOYMENT.md) before changing an existing installation.
 
 ## Local development
 
@@ -71,12 +71,13 @@ Remote MCP clients discover OAuth metadata on the same origin and use authorizat
 
 Public OAuth client registrations are capped and unclaimed registrations expire after 30 days. Compose health checks both `/healthz` and `/mcp/ready`, so a stopped MCP worker makes the container unhealthy for operator monitoring or orchestration.
 
-The project does not provide email verification, password-reset email, MFA, external identity, or an audit log. JSON export is text-only and excludes images. A complete backup must preserve both SQLite and `/data/images`. Report vulnerabilities through the private process in [Security](docs/SECURITY.md).
+The project does not provide email verification, password-reset email, MFA, or external identity. Recovery uses eight hashed, single-use codes and an optional administrator-configured public Contact page. JSON export is text-only and excludes images and prompt attachments. A complete backup must preserve SQLite, `/data/images`, and `/data/prompt-attachments`. Report vulnerabilities through the private process in [Security](docs/SECURITY.md).
 
 ## Documentation
 
 - [Technical reference](docs/TECHNICAL.md)
 - [Deployment, migration, backup, and rollback](docs/DEPLOYMENT.md)
+- [Version 0.4.0 release notes](docs/RELEASE_NOTES_v0.4.0.md)
 - [Version 0.3.0 release notes](docs/RELEASE_NOTES_v0.3.0.md)
 - [Version 0.2.0 release notes](docs/RELEASE_NOTES_v0.2.0.md)
 - [Version 0.1.0 release notes](docs/RELEASE_NOTES_v0.1.0.md)

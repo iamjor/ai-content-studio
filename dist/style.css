@@ -1529,3 +1529,38 @@ p {
 }
 .oauth-page>.panel{width:min(36rem,100%)}
 .oauth-page form{display:grid;gap:1rem}
+
+.markdown-preview {
+  max-height: 24rem;
+  overflow: auto;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.markdown-preview > :first-child { margin-top: 0; }
+.markdown-preview > :last-child { margin-bottom: 0; }
+.recovery-codes {
+  user-select: all;
+  white-space: pre-wrap;
+  letter-spacing: .08em;
+  line-height: 1.8;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 1rem;
+}
+.permission-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .75rem 1rem;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .75rem;
+}
+.permission-grid legend { color: var(--muted); padding: 0 .4rem; }
+@media print {
+  body * { visibility: hidden; }
+  #securitySetup, #securitySetup * { visibility: visible; }
+  #securitySetup { position: absolute; inset: 0; }
+  #securitySetup button, #securitySetup input, #securitySetup label { display: none; }
+}

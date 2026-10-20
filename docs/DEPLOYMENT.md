@@ -43,6 +43,8 @@ The first v0.2 start records schema version 4 and normalizes each workspace with
 
 The first v0.3 start records schema version 5 and additively creates OAuth client, consent flow, authorization code, grant, hashed token, and MCP request-limit tables. It also adds stable IDs only where older prompts, gates, or shots lack one. Existing users, sessions, workspace revisions, projects, descriptions, episodes, scripts, hooks, characters, prompts, images, planning fields, and legacy tables are not replaced. Back up SQLite and the image directory together before upgrade.
 
+The first v0.4 start records schema version 6 and additively adds recovery-code hashes, forced-setup flags, minimal security events, prompt attachment metadata, tool ownership and assignments, and MCP entitlements. Existing users, projects, episodes, characters, scripts, images, prompt text and snapshots, tools, OAuth clients and grants, tokens, sessions, revisions, IDs, and archive state are preserved. Existing administrator tools remain visible to administrators and are hidden from regular users until explicitly assigned. Existing administrators retain MCP access. Existing users without confirmed recovery codes are directed through setup after their next browser login. Back up SQLite, `/data/images`, and `/data/prompt-attachments` together before upgrade.
+
 The v0.3 image installs the hash-locked official MCP SDK dependency set from `requirements.txt`; `requirements.in` records the direct SDK pin and starts a loopback-only MCP worker behind the existing public service. No external database, paid API, or production OAuth client is required.
 
 ## 4. Production rollout
@@ -52,7 +54,7 @@ Carry out these steps only on an installation you administer.
 - [ ] Fetch and build the exact reviewed commit.
 - [ ] Update only AI Content Studio.
 - [ ] Never run `docker compose down -v`.
-- [ ] Confirm `studio_data` remains attached and contains both SQLite and the private `/data/images` directory.
+- [ ] Confirm `studio_data` remains attached and contains SQLite plus the private `/data/images` and `/data/prompt-attachments` directories.
 - [ ] Inspect migration logs without exposing private data.
 - [ ] Remove the bootstrap password after successful creation and recreate the container.
 

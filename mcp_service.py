@@ -371,7 +371,7 @@ def upsert_project_prompt(
         "name": text(name, "name", 120, True).strip(),
         "category": text(category, "category", 80, True).strip(),
         "purpose": text(purpose, "purpose", 300),
-        "body": text(body, "body", MAX_TEXT, True),
+        "body": text(body, "body", server.MAX_PROMPT_BODY, True),
         "modelSettings": text(model_settings, "model_settings", 5_000),
     }
     if prompt_id is not None and not server.IDENTIFIER_PATTERN.fullmatch(prompt_id):
@@ -466,6 +466,28 @@ def _remove_private_images(database, user_id, character_ids):
     return [row["storage_id"] for row in selected]
 
 
+
+def _remove_prompt_attachments(database, user_id, project_id, prompt_id=None):
+    """Delete scoped attachment metadata and return opaque storage IDs."""
+    if prompt_id is None:
+        rows = database.execute(
+            "SELECT storage_id FROM prompt_attachments WHERE user_id=? AND project_id=?",
+            (user_id, project_id),
+        ).fetchall()
+        database.execute(
+            "DELETE FROM prompt_attachments WHERE user_id=? AND project_id=?",
+            (user_id, project_id),
+        )
+    else:
+        rows = database.execute(
+            "SELECT storage_id FROM prompt_attachments WHERE user_id=? AND project_id=? AND prompt_id=?",
+            (user_id, project_id, prompt_id),
+        ).fetchall()
+        database.execute(
+            "DELETE FROM prompt_attachments WHERE user_id=? AND project_id=? AND prompt_id=?",
+            (user_id, project_id, prompt_id),
+        )
+    return [row["storage_id"] for row in rows]
 def _finish_image_cleanup(user_id, result):
     """Remove image files after commit without exposing their private storage names."""
     storage_ids = result.pop("_storageIds", [])
@@ -478,6 +500,16 @@ def _finish_image_cleanup(user_id, result):
     result["receipt"]["privateImagesDeleted"] = len(storage_ids) - pending
     if pending:
         result["receipt"]["privateImageFilesPendingCleanup"] = pending
+    attachment_ids = result.pop("_attachmentStorageIds", [])
+    attachment_pending = 0
+    for storage_id in attachment_ids:
+        try:
+            (server.attachment_root() / str(user_id) / storage_id).unlink(missing_ok=True)
+        except OSError:
+            attachment_pending += 1
+    result["receipt"]["privateAttachmentsDeleted"] = len(attachment_ids) - attachment_pending
+    if attachment_pending:
+        result["receipt"]["privateAttachmentFilesPendingCleanup"] = attachment_pending
     return result
 
 
@@ -511,6 +543,7 @@ def delete_project(user_id, project_id, expected_revision, confirmation):
                 if item.get("id") not in other_character_ids
             ],
         )
+        attachment_ids = _remove_prompt_attachments(database, user_id, project_id)
         data["projects"].remove(target)
         if data.get("activeId") == project_id:
             data["activeId"] = next(
@@ -531,6 +564,7 @@ def delete_project(user_id, project_id, expected_revision, confirmation):
                 "gatesDeleted": len(target.get("gates", [])),
             },
             "_storageIds": storage_ids,
+            "_attachmentStorageIds": attachment_ids,
         }
 
     return _finish_image_cleanup(
@@ -594,6 +628,7 @@ def delete_project_prompt(user_id, project_id, prompt_id, expected_revision, con
         prompts = project(data, project_id).get("prompts", [])
         target = record(prompts, prompt_id, "Prompt")
         _confirmed(target.get("name", ""), confirmation, "prompt name")
+        attachment_ids = _remove_prompt_attachments(database, user_id, project_id, prompt_id)
         prompts.remove(target)
         return {
             "changed": [{"type": "prompt", "id": prompt_id, "deleted": True}],
@@ -601,9 +636,12 @@ def delete_project_prompt(user_id, project_id, prompt_id, expected_revision, con
                 "type": "prompt", "id": prompt_id,
                 "name": target.get("name", ""), "shotSnapshotsPreserved": True,
             },
+            "_attachmentStorageIds": attachment_ids,
         }
 
-    return mutate_workspace(user_id, expected_revision, apply)
+    return _finish_image_cleanup(
+        user_id, mutate_workspace(user_id, expected_revision, apply)
+    )
 
 
 def delete_episode_shot(

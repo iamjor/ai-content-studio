@@ -51,7 +51,7 @@ Unauthenticated clients may load static assets, query session state, sign in, an
 
 ## 9. Data model
 
-Schema version 5 uses `users`, `workspaces`, `sessions`, `app_settings`, `login_attempts`, `tools`, `character_images`, `oauth_clients`, `oauth_flows`, `oauth_codes`, `oauth_grants`, `oauth_tokens`, and `mcp_rate_limits`. Users have a role, active state, optional archive time, display name, password record, and theme. Workspaces are keyed by user ID and contain a revision plus JSON. Sessions contain token hashes, CSRF tokens, and fixed expiry times. Tools are shared catalog records. Image metadata is unique per user and character.
+Schema version 6 retains the version 5 tables and adds `recovery_codes`, `security_events`, `prompt_attachments`, `tool_assignments`, and `mcp_permissions`. Users add forced-password-change and recovery-setup flags. Tools add an optional owner user ID, where a null owner identifies an administrator-created tool. Attachment metadata stores only account and prompt scope, trusted MIME type, original display name, byte size, and an opaque random storage ID. File bytes stay in `/data/prompt-attachments`, not SQLite.
 
 Workspace JSON retains existing project, episode, character, prompt, and shot IDs and accepts legacy structures through migration and normalization. Missing v0.2 fields receive empty defaults without replacing descriptions, hooks, scripts, revisions, or stored images. A shot may link to a reusable prompt by ID, but stores its own final image and video prompt text so later library edits do not rewrite production instructions. The legacy `workspace` table is left intact after its first non-destructive copy to the initial administrator.
 
@@ -61,7 +61,7 @@ Roles are `admin` and `user`. Self-registration can create only `user` accounts.
 
 ## 11. Authentication and sessions
 
-Passwords are limited to 12 through 256 characters and stored using salted PBKDF2-SHA256 with 600,000 iterations. Login requests are size-limited and throttled atomically by source before password verification. Sessions are random, stored server-side by token hash, and expire at a fixed time. Cookies are HttpOnly, SameSite Strict, and Secure unless explicitly disabled for local HTTP development. Password changes revoke all sessions for that user.
+Passwords are limited to 12 through 256 characters and stored using salted PBKDF2-SHA256 with 600,000 iterations. Login requests are size-limited and throttled atomically by source before password verification. Sessions are random, stored server-side by token hash, and expire at a fixed time. Cookies are HttpOnly, SameSite Strict, and Secure unless explicitly disabled for local HTTP development. Password changes revoke all sessions and OAuth access for that user. Recovery codes use unique salts and PBKDF2 hashes, are confirmed before dashboard entry, and are consumed atomically. Administrator reset also invalidates recovery codes and pending OAuth codes. Security events contain no password, code, token, tool argument, or private content.
 
 ## 12. Configuration
 
@@ -83,7 +83,7 @@ Browser routes use one document and client-side section selection; deep-linkable
 
 ## 16. Operations, backup, and restore
 
-Monitor container health, restart behavior, persistent storage capacity, authentication failures, and application logs without recording request bodies or credentials. The server logs method, path, and status only. A consistent SQLite backup plus a copy of the image directory is required for complete recovery. Restore both from the same backup point and verify login, workspace revisions, images, tools, and lifecycle flags. No retention period, recovery objective, or service objective is defined by the repository.
+Monitor container health, restart behavior, persistent storage capacity, authentication failures, and application logs without recording request bodies or credentials. The server logs method, path, and status only. A complete backup requires consistent copies of SQLite, the image directory, and the prompt-attachments directory. Restore all three from the same backup point and verify login, recovery state, workspace revisions, images, prompt attachments, tools, assignments, and MCP permissions. Browser JSON export is text-only and never claims to contain uploaded files. No retention period, recovery objective, or service objective is defined by the repository.
 
 ## 17. Deployment and change management
 
@@ -132,3 +132,11 @@ Related references:
 - [Changelog](../CHANGELOG.md)
 
 Glossary: a workspace is one user's revisioned JSON planning document; the image root is private file storage for character references; a trusted proxy is an explicitly configured immediate network peer permitted to supply `CF-Connecting-IP`.
+
+## 19. Version 0.4 security and storage boundaries
+
+Prompt bodies are bounded at 120,000 characters. Source notes are bounded at 20,000 characters. Attachments allow 20 MB per file, 20 files and 100 MB per prompt, and only validated PDF, DOCX, Markdown, UTF-8 text, PNG, JPEG, or WebP content. Random storage IDs and authenticated account, project, and prompt lookups prevent caller-controlled paths. Current metadata is removed in the SQLite transaction before best-effort post-commit file cleanup, so an interrupted unlink can leave an unreferenced file but cannot grant access.
+
+Recovery requests use bounded JSON, generic account responses, salted code hashes, atomic unused-code updates, and separate source and normalized-account throttle scopes. A successful recovery or administrator reset revokes sessions, grants, and OAuth tokens. Recovery setup plaintext exists only in the response that creates the set.
+
+Normal users can create and manage their own tools. Administrator-created tools require an explicit assignment and remain view and use only for recipients. MCP entitlements are evaluated on consent, exchange, refresh, bearer resolution, tools/list output, and tool calls. Read, write, archive/restore, and permanent delete remain independent.
