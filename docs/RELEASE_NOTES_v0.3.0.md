@@ -1,6 +1,6 @@
 # AI Content Studio 0.3.0 release notes
 
-Version 0.3.0 adds secure, account-scoped remote MCP access to the v0.2 content-planning workspace. This development change does not deploy an installation, create a tag or GitHub Release, register a production OAuth client, or include a private ChatGPT plugin package.
+Version 0.3.0 adds secure, account-scoped remote MCP access to the v0.2 content-planning workspace. The release was verified on a live self-hosted HTTPS installation with a private ChatGPT connection. The public repository does not include production credentials, OAuth token values, private workspace records, or the private ChatGPT app configuration.
 
 ## Integration
 
@@ -12,6 +12,9 @@ Version 0.3.0 adds secure, account-scoped remote MCP access to the v0.2 content-
 - Added one-hour access tokens and rotating 30-day refresh tokens stored only as hashes.
 - Added `aics.read` and `aics.write` scope checks tied to the owning account.
 - Added Account integration visibility and revocation without exposing token values.
+- Accepted bounded optional OAuth `ui_locales` hints as non-persisted UI hints for compatible clients.
+- Restricted consent form submission to the validated registered callback origin and used `303 See Other` after successful authorization.
+- Preserved client-provided `Mcp-Method`, `Mcp-Name`, and case-insensitive `Mcp-Param-*` routing metadata through the public proxy for modern MCP discovery and tool calls.
 
 ## Tools
 
@@ -24,6 +27,8 @@ Tools use bounded input schemas and server-side validation. The server rejects u
 ## Security and privacy
 
 The MCP worker binds only to loopback. The public service validates bearer tokens, applies a per-token request limit, forwards only protocol headers, and never forwards browser cookies. Public OAuth registration and authorization flows have proxy-safe per-source limits, bounded storage, and safe expiry cleanup. Effective scope is stored per token so a narrowed refresh remains read-only. Compose checks both web and MCP readiness. Browser session, CSRF, Origin, Host, proxy, and cookie protections remain unchanged.
+
+An opt-in `AICS_MCP_DIAGNOSTICS` mode records only bounded transport failure metadata. It excludes authorization values, cookies, OAuth credentials, tool arguments, full request and response bodies, and workspace content. It is disabled by default and was returned to disabled after the controlled production verification.
 
 MCP reads never return image bytes, private image URLs, storage paths, passwords, sessions, OAuth secrets, administrator data, or another account's workspace. Direct image upload and image-only deletion remain browser-only. Confirmed character and project deletion also remove associated private images as required. The MCP tool catalog contains no account deletion, administrator, registration, deployment, publishing, shell, arbitrary file or database, AI generation, or paid API tools.
 
@@ -43,7 +48,9 @@ A compatible client connects to `https://your-origin.example/mcp`, follows disco
 
 The focused suite covers discovery, redirect validation, PKCE consent, token rotation and revocation, unauthenticated rejection, account isolation, revisions and conflicts, partial preservation, size limits, archive and restore, deletion confirmation and isolation, cascade and image cleanup, actual MCP initialization, tool listing, and representative read and write calls.
 
-Browser appearance, Docker build and health, and live reverse-proxy behavior must be reported as unverified when their required tools are unavailable. Production migration, OAuth clients, real records, media, deployment, and rollback were not exercised by this development PR.
+The release was then built and started through Docker Compose on the maintained self-hosted installation. `/healthz` and `/mcp/ready` returned healthy results. A private ChatGPT connection completed OAuth authorization and token exchange, loaded the MCP tool catalog through `server/discover`, and completed a read-only project-listing request. Temporary sanitized diagnostics identified and verified the modern routing-header compatibility fix, then were disabled. No production credential, token value, project content, prompt body, script, image, or private plugin configuration was committed to the public repository.
+
+Rollback restoration and a destructive production MCP operation were not exercised as part of release verification.
 
 ## Known limits
 
