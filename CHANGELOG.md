@@ -12,7 +12,12 @@
 - Added additive schema version 5 tables for OAuth clients, flows, codes, grants, hashed tokens, and MCP rate limits.
 - Added proxy-safe OAuth public-write limits, a bounded expiring client policy, per-token effective scopes, and MCP-aware container health.
 - Added OAuth, transport, scope, expiry, isolation, migration, conflict, preservation, limit, and deletion tests.
-- Prepared release and upgrade documentation without creating a tag, GitHub Release, OAuth client, or deployment.
+- Accepted bounded optional OAuth `ui_locales` hints without persisting them in OAuth records.
+- Allowed consent submission only to the validated registered callback origin and completed successful consent with `303 See Other`.
+- Added opt-in sanitized MCP initialization diagnostics without recording credentials, tool arguments, or workspace content.
+- Preserved modern `Mcp-Method`, `Mcp-Name`, and case-insensitive `Mcp-Param-*` routing headers through the public proxy.
+- Verified a live self-hosted HTTPS deployment with successful OAuth consent, token exchange, ChatGPT tool discovery, read-only project listing, and healthy web and MCP readiness checks.
+- Disabled temporary MCP diagnostics after production verification.
 
 ## 0.2.0 - 2026-10-18
 
