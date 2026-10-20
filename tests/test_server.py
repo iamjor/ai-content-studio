@@ -309,6 +309,9 @@ class McpDiagnosticsUnitTests(unittest.TestCase):
         "MCP-Protocol-Version": "2025-11-25",
         "Mcp-Session-Id": "private-session-value",
         "Last-Event-ID": "private-event-value",
+        "Mcp-Method": "initialize",
+        "Mcp-Name": "private-tool-name",
+        "mCp-PaRaM-secret": "private-param-value",
     }
 
     @staticmethod
@@ -361,7 +364,8 @@ class McpDiagnosticsUnitTests(unittest.TestCase):
                 "message": (
                     "Invalid private-tool-argument; Bearer header-secret-token; "
                     "cookie=AICS_SESSION=cookie-secret-value; "
-                    "session=private-session-value; event=private-event-value"
+                    "session=private-session-value; event=private-event-value; "
+                    "tool=private-tool-name; param=private-param-value"
                 ),
                 "data": {"workspace": "private-workspace-content"},
             },
@@ -393,7 +397,7 @@ class McpDiagnosticsUnitTests(unittest.TestCase):
             "header-secret-token", "cookie-secret-value",
             "private-tool-argument", "private-client-name",
             "private-workspace-content", "private-session-value",
-            "private-event-value",
+            "private-event-value", "private-tool-name", "private-param-value",
         ):
             self.assertNotIn(secret, logged)
         self.assertNotIn("Authorization", logged)
@@ -457,7 +461,59 @@ class McpDiagnosticsUnitTests(unittest.TestCase):
             (
                 "Authorization", "Accept", "Content-Type",
                 "MCP-Protocol-Version", "Mcp-Session-Id", "Last-Event-ID",
+                "Mcp-Method", "Mcp-Name",
             ),
+        )
+
+
+class McpProxyHeaderUnitTests(unittest.TestCase):
+    """Verify the proxy preserves only approved MCP end-to-end headers."""
+
+    def test_server_discover_preserves_method_header(self):
+        """Forward the modern discovery route without reconstructing it."""
+        forwarded = server.forwarded_mcp_headers({
+            "Mcp-Method": "server/discover",
+        })
+        self.assertEqual(forwarded, {"Mcp-Method": "server/discover"})
+
+    def test_tools_list_preserves_method_header(self):
+        """Forward the modern tool-listing route unchanged."""
+        forwarded = server.forwarded_mcp_headers({"Mcp-Method": "tools/list"})
+        self.assertEqual(forwarded, {"Mcp-Method": "tools/list"})
+
+    def test_tools_call_preserves_method_name_and_param_headers(self):
+        """Forward modern tool routing metadata and private parameter values."""
+        headers = {
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "get_project",
+            "Mcp-Param-project": "private-project-id",
+        }
+        self.assertEqual(server.forwarded_mcp_headers(headers), headers)
+
+    def test_header_matching_is_case_insensitive(self):
+        """Recognize modern metadata regardless of incoming field-name casing."""
+        headers = {
+            "mCp-MeThOd": "server/discover",
+            "MCP-NAME": "get_project",
+            "mCp-PaRaM-PrOjEcT": "private-project-id",
+        }
+        self.assertEqual(server.forwarded_mcp_headers(headers), headers)
+
+    def test_hop_by_hop_and_unapproved_headers_are_not_forwarded(self):
+        """Exclude transport framing, cookies, and unrelated client headers."""
+        headers = {
+            "Authorization": "Bearer private-token",
+            "Host": "public.example",
+            "Connection": "upgrade",
+            "Content-Length": "123",
+            "Transfer-Encoding": "chunked",
+            "Upgrade": "websocket",
+            "Cookie": "AICS_SESSION=private-cookie",
+            "X-Unrelated": "private-value",
+        }
+        self.assertEqual(
+            server.forwarded_mcp_headers(headers),
+            {"Authorization": "Bearer private-token"},
         )
 
 
@@ -2224,6 +2280,40 @@ class ServerIntegrationTests(unittest.TestCase):
                 """,
                 (server.token_hash(raw_token), now, now + 3600),
             )
+
+        modern_version = "2026-07-28"
+        discover_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": modern_version,
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "AICS discovery regression",
+                        "version": "1",
+                    },
+                },
+            },
+        }
+        discover_request = urllib.request.Request(
+            self.base_url + "/mcp",
+            data=json.dumps(discover_payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": "Bearer " + raw_token,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": modern_version,
+                "Mcp-Method": "server/discover",
+            },
+        )
+        with urllib.request.urlopen(discover_request, timeout=10) as response:
+            discovered = json.loads(response.read())
+        self.assertIn("result", discovered)
+        self.assertNotIn("error", discovered)
+        self.assertIn(modern_version, discovered["result"]["supportedVersions"])
 
         def mcp_request(payload, session_id=None):
             """Send one JSON-RPC request through the public MCP transport."""
