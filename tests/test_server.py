@@ -1355,6 +1355,181 @@ class ServerIntegrationTests(unittest.TestCase):
                 "DELETE FROM oauth_source_limits WHERE purpose='registration'"
             )
 
+    def test_17b_oauth_callback_csp_and_complete_code_exchange(self):
+        """Permit only the registered callback and preserve one-time OAuth use."""
+        normal_status, _, normal_headers = TestClient(self.base_url).request("/")
+        self.assertEqual(normal_status, 200)
+        self.assertEqual(
+            normal_headers.get("Content-Security-Policy"),
+            server.DEFAULT_CONTENT_SECURITY_POLICY,
+        )
+        self.assertIn(
+            "form-action 'self';",
+            normal_headers.get("Content-Security-Policy", ""),
+        )
+
+        client = TestClient(self.base_url)
+        redirect_uri = (
+            "https://chatgpt.com/connector_platform_oauth_redirect"
+        )
+        status, registered, _ = client.request(
+            "/oauth/register",
+            method="POST",
+            payload={
+                "client_name": "ChatGPT callback test",
+                "redirect_uris": [redirect_uri],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        self.assertEqual(status, 201, registered)
+
+        admin = self.admin_client()
+        verifier = "c" * 48
+        state = "chatgpt-callback-state"
+        query = urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": registered["client_id"],
+                "redirect_uri": redirect_uri,
+                "scope": "aics.read aics.write",
+                "state": state,
+                "code_challenge": server.pkce_challenge(verifier),
+                "code_challenge_method": "S256",
+                "resource": self.base_url + "/mcp",
+                "ui_locales": "en-US",
+            }
+        )
+        status, page, headers = admin.request("/oauth/authorize?" + query)
+        self.assertEqual(status, 200, page)
+        consent_csp = headers.get("Content-Security-Policy", "")
+        self.assertIn(
+            "form-action 'self' https://chatgpt.com;",
+            consent_csp,
+        )
+        self.assertNotIn("https://arbitrary.example", consent_csp)
+        self.assertNotIn("/connector_platform_oauth_redirect", consent_csp)
+        self.assertEqual(
+            headers.get("Cross-Origin-Opener-Policy"), "same-origin"
+        )
+        with self.assertRaises(ValueError):
+            server.oauth_redirect_origin(
+                "https://chatgpt.com;form-action.example/callback"
+            )
+        flow = page.split('name="flow" value="', 1)[1].split('"', 1)[0]
+        flow_cookie = headers.get("Set-Cookie", "").split(";", 1)[0]
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            """Keep OAuth callback redirects available for exact assertions."""
+
+            def redirect_request(
+                self, request, file_pointer, code, message, headers, new_url
+            ):
+                """Decline automatic navigation to the external callback."""
+                return None
+
+        consent_body = urllib.parse.urlencode(
+            {"flow": flow, "decision": "approve"}
+        ).encode("utf-8")
+
+        def submit_consent():
+            """Submit the same bound consent flow without following redirects."""
+            request = urllib.request.Request(
+                self.base_url + "/oauth/authorize",
+                data=consent_body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": admin.cookie + "; " + flow_cookie,
+                },
+            )
+            try:
+                return urllib.request.build_opener(NoRedirect).open(
+                    request, timeout=5
+                )
+            except urllib.error.HTTPError as response:
+                return response
+
+        response = submit_consent()
+        self.assertEqual(response.status, 303)
+        callback_url = response.headers["Location"]
+        callback = urllib.parse.urlsplit(callback_url)
+        self.assertEqual(
+            (callback.scheme, callback.netloc, callback.path),
+            (
+                "https",
+                "chatgpt.com",
+                "/connector_platform_oauth_redirect",
+            ),
+        )
+        parameters = urllib.parse.parse_qs(callback.query)
+        self.assertEqual(parameters["state"], [state])
+        self.assertEqual(parameters["iss"], [self.base_url])
+        code = parameters["code"][0]
+        with sqlite3.connect(self.database_path) as database:
+            codes_after_consent = database.execute(
+                "SELECT COUNT(*) FROM oauth_codes"
+            ).fetchone()[0]
+            self.assertIsNotNone(
+                database.execute(
+                    "SELECT 1 FROM oauth_codes WHERE code_hash=?",
+                    (server.token_hash(code),),
+                ).fetchone()
+            )
+
+        replay = submit_consent()
+        self.assertEqual(replay.status, 400)
+        replay_payload = json.loads(replay.read())
+        self.assertEqual(replay_payload["error"], "invalid_request")
+        self.assertIn("expired", replay_payload["error_description"].lower())
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM oauth_codes").fetchone()[0],
+                codes_after_consent,
+            )
+
+        def token_exchange():
+            """Exchange the issued code through the public token endpoint."""
+            request = urllib.request.Request(
+                self.base_url + "/oauth/token",
+                data=urllib.parse.urlencode(
+                    {
+                        "grant_type": "authorization_code",
+                        "client_id": registered["client_id"],
+                        "redirect_uri": redirect_uri,
+                        "code": code,
+                        "code_verifier": verifier,
+                        "resource": self.base_url + "/mcp",
+                    }
+                ).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+            )
+            try:
+                response = urllib.request.urlopen(request, timeout=5)
+            except urllib.error.HTTPError as error:
+                response = error
+            return response.status, json.loads(response.read() or b"{}")
+
+        token_status, tokens = token_exchange()
+        self.assertEqual(token_status, 200, tokens)
+        self.assertIn("access_token", tokens)
+        self.assertIn("refresh_token", tokens)
+        replay_status, replay_tokens = token_exchange()
+        self.assertEqual(replay_status, 400, replay_tokens)
+        self.assertEqual(replay_tokens["error"], "invalid_grant")
+
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                "DELETE FROM oauth_source_limits WHERE purpose='authorization'"
+            )
+            database.execute(
+                "DELETE FROM oauth_source_limits WHERE purpose='registration'"
+            )
+
     def test_18_oauth_discovery_pkce_rotation_revocation_and_redirects(self):
         """Exercise OAuth discovery, consent, PKCE, rotation, and revocation."""
         client = TestClient(self.base_url)
@@ -1508,7 +1683,7 @@ class ServerIntegrationTests(unittest.TestCase):
             urllib.request.build_opener(NoRedirect).open(request, timeout=5)
             self.fail("Authorization redirect was expected.")
         except urllib.error.HTTPError as response:
-            self.assertEqual(response.code, 302)
+            self.assertEqual(response.code, 303)
             callback = urllib.parse.urlsplit(response.headers["Location"])
         parameters = urllib.parse.parse_qs(callback.query)
         self.assertEqual(parameters["state"], ["state-value"])
