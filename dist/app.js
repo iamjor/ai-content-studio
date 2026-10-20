@@ -37,6 +37,65 @@
     }
   }
 
+
+  /** Render a conservative Markdown subset after escaping all raw HTML. */
+  function renderMarkdown(value) {
+    var text = escapeHtml(value);
+    text = text.replace(/^### (.+)$/gm, "<h4>$1</h4>").replace(/^## (.+)$/gm, "<h3>$1</h3>").replace(/^# (.+)$/gm, "<h2>$1</h2>");
+    text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
+    text = text.replace(/\[([^\]]+)\]\((https:\/\/[^\s)]+)\)/g, function (_, label, url) {
+      return '<a href="' + escapeHtml(safeLink(url)) + '" target="_blank" rel="noopener noreferrer">' + label + "</a>";
+    });
+    return text.split(/\n{2,}/).map(function (block) { return /^<h[234]>/.test(block) ? block : "<p>" + block.replace(/\n/g, "<br>") + "</p>"; }).join("");
+  }
+
+  function updatePromptPreview() {
+    byId("promptPreview").innerHTML = renderMarkdown(byId("promptBody").value);
+  }
+
+  function recoveryText() {
+    return "AI Content Studio recovery codes\nSave privately. Each code works once.\n\n" + byId("recoveryCodes").textContent + "\n";
+  }
+
+  function showRecoveryCodeSet(result) {
+    session.recoverySetId = result.setId;
+    byId("recoveryCodes").textContent = result.codes.join("\n");
+    byId("recoveryCodeDisplay").classList.remove("hidden");
+    byId("generateRecoveryCodes").classList.add("hidden");
+    byId("confirmRecoveryCode").focus();
+  }
+
+  function showSecuritySetup(payload, regeneration) {
+    session = payload;
+    dismissBootstrap();
+    byId("appView").classList.add("hidden");
+    byId("authView").classList.remove("hidden");
+    ["loginForm", "registerForm", "registrationPrompt", "showRecovery", "recoveryForm"].forEach(function (id) { byId(id).classList.add("hidden"); });
+    byId("securitySetup").classList.remove("hidden");
+    byId("forcedPasswordForm").classList.toggle("hidden", !session.user.mustChangePassword);
+    byId("recoverySetupFlow").classList.toggle("hidden", session.user.mustChangePassword);
+    byId("setupPasswordWrap").classList.toggle("hidden", !regeneration);
+    byId("recoveryCodeDisplay").classList.add("hidden");
+    byId("generateRecoveryCodes").classList.remove("hidden");
+    byId("securitySetupTitle").textContent = regeneration ? "Regenerate recovery codes" : "Secure your account";
+    setStatus(byId("securitySetupStatus"), "", "");
+  }
+
+  async function loadPromptAttachments() {
+    var project = activeProject();
+    var prompt = promptIndex >= 0 ? project.prompts[promptIndex] : null;
+    if (!project || !prompt) {
+      byId("promptAttachmentList").innerHTML = '<div class="notice">Save the prompt before adding private files.</div>';
+      return;
+    }
+    try {
+      var path = "/api/projects/" + encodeURIComponent(project.id) + "/prompts/" + encodeURIComponent(prompt.id) + "/attachments";
+      var attachments = (await api(path)).attachments;
+      byId("promptAttachmentList").innerHTML = attachments.length ? attachments.map(function (item) {
+        return '<article class="gate-row" data-attachment-id="' + item.id + '"><div><strong>' + escapeHtml(item.filename) + '</strong><p class="muted">' + escapeHtml(item.mimeType) + " · " + Math.ceil(item.byteSize / 1024) + ' KB</p></div><a class="btn" href="' + path + "/" + item.id + '" target="_blank" rel="noopener">Download</a><button class="btn danger" data-delete-attachment type="button">Delete</button></article>';
+      }).join("") : '<div class="card empty"><p>No private attachments.</p></div>';
+    } catch (error) { byId("promptAttachmentList").innerHTML = '<div class="notice">' + escapeHtml(error.message) + "</div>"; }
+  }
   function setStatus(element, message, kind) {
     element.textContent = message || "";
     element.classList.toggle("error", kind === "error");
@@ -85,6 +144,10 @@
     project.bible = project.bible && typeof project.bible === "object" ? project.bible : {};
     ["logline", "premise", "seasonArc", "worldRules", "toneStyle", "audience", "language", "aspectRatio", "productionConstraints"].forEach(function (field) {
       if (typeof project.bible[field] !== "string") { project.bible[field] = ""; }
+    });
+    project.prompts.forEach(function (prompt) {
+      prompt.sourceUrl = typeof prompt.sourceUrl === "string" ? prompt.sourceUrl : "";
+      prompt.sourceNotes = typeof prompt.sourceNotes === "string" ? prompt.sourceNotes : "";
     });
     project.archived = Boolean(project.archived);
     project.episodes.forEach(function (episode) {
@@ -179,6 +242,9 @@
     byId("loginPassword").value = "";
     setStatus(byId("loginStatus"), message || "", message ? "error" : "");
     byId("registrationPrompt").classList.toggle("hidden", !byId("registrationPrompt").dataset.enabled);
+    byId("showRecovery").classList.remove("hidden");
+    byId("securitySetup").classList.add("hidden");
+    byId("recoveryForm").classList.add("hidden");
     byId("registerForm").classList.add("hidden");
     byId("loginForm").classList.remove("hidden");
     byId("loginUsername").focus();
@@ -190,7 +256,9 @@
     byId("accountUsername").value = session.user.username;
     byId("accountDisplayName").value = session.user.displayName;
     byId("adminNav").classList.toggle("hidden", session.user.role !== "admin");
-    byId("toolAdminActions").classList.toggle("hidden", session.user.role !== "admin");
+    byId("toolAdminActions").classList.remove("hidden");
+    byId("toolFilterWrap").classList.toggle("hidden", session.user.role !== "admin");
+    byId("integrationsPanel").classList.toggle("hidden", !session.mcpPermissions.enabled);
   }
 
   function renderIntegrations(items) {
@@ -243,10 +311,14 @@
 
   async function showAuthenticated(payload, focusDestination) {
     session = payload;
+    if (session.user.mustChangePassword || session.user.recoverySetupRequired) {
+      showSecuritySetup(payload, false);
+      return;
+    }
     applyTheme(session.user.theme, false);
     populateAccount();
     scheduleExpiry();
-    await Promise.all([loadWorkspace(), loadTools(), loadIntegrations()]);
+    await Promise.all([loadWorkspace(), loadTools(), session.mcpPermissions.enabled ? loadIntegrations() : Promise.resolve()]);
     byId("authView").classList.add("hidden");
     dismissBootstrap();
     byId("appView").classList.remove("hidden");
@@ -371,6 +443,11 @@
     byId("promptPurpose").value = prompt.purpose || "";
     byId("promptBody").value = prompt.body || "";
     byId("promptSettings").value = prompt.modelSettings || "";
+    byId("promptSourceUrl").value = prompt.sourceUrl || "";
+    byId("promptSourceNotes").value = prompt.sourceNotes || "";
+    byId("promptAttachments").value = "";
+    updatePromptPreview();
+    loadPromptAttachments();
     byId("deletePrompt").classList.toggle("hidden", index < 0);
     byId("promptDialog").showModal();
     byId("promptName").focus();
@@ -489,10 +566,11 @@
     var filter = byId("userFilter").value;
     users = users.filter(function (user) { return filter === "all" || (filter === "archived" ? user.archived : !user.archived); });
     byId("userList").innerHTML = users.length ? users.map(function (user) {
-      return '<article class="user-row" data-user-row="' + user.id + '"><div class="user-meta"><strong>' + escapeHtml(user.displayName) + '</strong><span>@' + escapeHtml(user.username) + ' · ' + (user.archived ? "Archived" : user.active ? "Active" : "Disabled") + '</span></div><label class="field">Role<select data-user-role><option value="user"' + (user.role === "user" ? " selected" : "") + '>User</option><option value="admin"' + (user.role === "admin" ? " selected" : "") + '>Admin</option></select></label><div class="card-actions"><button class="btn" data-user-action="role" type="button">Save role</button>' + (user.archived ? '<button class="btn" data-user-action="restore" type="button">Restore</button>' : (user.active ? '<button class="btn" data-user-action="disable" type="button">Disable</button><button class="btn" data-user-action="archive" type="button">Archive</button>' : '<button class="btn" data-user-action="restore" type="button">Restore</button><button class="btn" data-user-action="archive" type="button">Archive</button>')) + '<button class="btn danger" data-user-action="delete" type="button">Delete</button></div></article>';
+      var permissions = user.mcpPermissions;
+      var mcp = user.role === "admin" ? '<p class="muted">Administrators retain full MCP access.</p>' : '<fieldset class="permission-grid"><legend>MCP permissions</legend>' + ["enabled", "read", "write", "archive", "delete"].map(function (key) { return '<label><input type="checkbox" data-mcp="' + key + '"' + (permissions[key] ? " checked" : "") + '> ' + escapeHtml(key === "enabled" ? "Enabled" : key) + "</label>"; }).join("") + '<button class="btn" data-user-action="mcp" type="button">Save MCP permissions</button></fieldset>';
+      return '<article class="user-row" data-user-row="' + user.id + '"><div class="user-meta"><strong>' + escapeHtml(user.displayName) + '</strong><span>@' + escapeHtml(user.username) + " · " + (user.archived ? "Archived" : user.active ? "Active" : "Disabled") + '</span></div><label class="field">Role<select data-user-role><option value="user"' + (user.role === "user" ? " selected" : "") + '>User</option><option value="admin"' + (user.role === "admin" ? " selected" : "") + '>Admin</option></select></label>' + mcp + '<div class="card-actions"><button class="btn" data-user-action="role" type="button">Save role</button><button class="btn" data-user-action="reset" type="button">Reset password</button>' + (user.archived ? '<button class="btn" data-user-action="restore" type="button">Restore</button>' : (user.active ? '<button class="btn" data-user-action="disable" type="button">Disable</button><button class="btn" data-user-action="archive" type="button">Archive</button>' : '<button class="btn" data-user-action="restore" type="button">Restore</button><button class="btn" data-user-action="archive" type="button">Archive</button>')) + '<button class="btn danger" data-user-action="delete" type="button">Delete</button></div></article>';
     }).join("") : '<div class="card empty"><h3>No users in this view</h3></div>';
   }
-
   async function loadAdmin() {
     if (!session || session.user.role !== "admin") { return; }
     try {
@@ -500,6 +578,7 @@
       byId("userList").dataset.users = JSON.stringify(results[0].users);
       renderUsers(results[0].users);
       byId("registrationEnabled").checked = results[1].registrationEnabled;
+      byId("contactPageUrl").value = results[1].contactPageUrl || "";
     } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); }
   }
 
@@ -507,10 +586,11 @@
     var filter = session && session.user.role === "admin" ? byId("toolFilter").value : "active";
     var tools = selectedItems(toolRecords, filter);
     byId("toolGrid").innerHTML = tools.length ? tools.map(function (tool) {
-      return '<article class="card catalog-card" data-tool-id="' + tool.id + '"><div><div class="kicker">' + escapeHtml(tool.category) + (tool.archived ? " · Archived" : "") + '</div><h3>' + escapeHtml(tool.name) + '</h3><p>' + escapeHtml(tool.purpose) + '</p>' + (tool.notes ? '<p class="muted">' + escapeHtml(tool.notes) + '</p>' : "") + '<a href="' + escapeHtml(safeLink(tool.url)) + '" target="_blank" rel="noopener noreferrer">Open official site</a></div>' + (session.user.role === "admin" ? '<div class="card-actions"><button class="btn" data-tool-action="edit" type="button">Edit</button><button class="btn" data-tool-action="' + (tool.archived ? "restore" : "archive") + '" type="button">' + (tool.archived ? "Restore" : "Archive") + '</button><button class="btn danger" data-tool-action="delete" type="button">Delete</button></div>' : "") + '</article>';
-    }).join("") : '<div class="card empty"><h3>No tools in this view</h3><p>An administrator can add a shared production tool.</p></div>';
+      var label = tool.adminCreated ? (tool.assigned ? "Assigned by administrator" : "Admin tool") : (tool.ownerUserId === session.user.id ? "Your tool" : "User tool");
+      var controls = tool.canManage ? '<div class="card-actions"><button class="btn" data-tool-action="edit" type="button">Edit</button><button class="btn" data-tool-action="' + (tool.archived ? "restore" : "archive") + '" type="button">' + (tool.archived ? "Restore" : "Archive") + '</button>' + (session.user.role === "admin" && tool.adminCreated ? '<button class="btn" data-tool-action="assign" type="button">Assign users</button>' : "") + '<button class="btn danger" data-tool-action="delete" type="button">Delete</button></div>' : '<p class="muted">View and use only</p>';
+      return '<article class="card catalog-card" data-tool-id="' + tool.id + '"><div><div class="kicker">' + escapeHtml(tool.category) + (tool.archived ? " · Archived" : "") + '</div><h3>' + escapeHtml(tool.name) + '</h3><p>' + escapeHtml(tool.purpose) + '</p>' + (tool.notes ? '<p class="muted">' + escapeHtml(tool.notes) + "</p>" : "") + '<p class="muted">' + escapeHtml(label) + '</p><a href="' + escapeHtml(safeLink(tool.url)) + '" target="_blank" rel="noopener noreferrer">Open official site</a></div>' + controls + "</article>";
+    }).join("") : '<div class="card empty"><h3>No tools in this view</h3><p>Create a private tool or ask an administrator to assign one.</p></div>';
   }
-
   async function loadTools() {
     if (!session) { return; }
     try { toolRecords = (await api("/api/tools")).tools; renderTools(); }
@@ -567,6 +647,38 @@
   byId("themeToggle").addEventListener("click", toggleTheme);
   byId("showRegister").addEventListener("click", function () { byId("loginForm").classList.add("hidden"); byId("registrationPrompt").classList.add("hidden"); byId("registerForm").classList.remove("hidden"); byId("registerName").focus(); });
   byId("hideRegister").addEventListener("click", function () { byId("registerForm").classList.add("hidden"); byId("loginForm").classList.remove("hidden"); byId("registrationPrompt").classList.remove("hidden"); byId("loginUsername").focus(); });
+  byId("showRecovery").addEventListener("click", function () { byId("loginForm").classList.add("hidden"); byId("registrationPrompt").classList.add("hidden"); byId("showRecovery").classList.add("hidden"); byId("recoveryForm").classList.remove("hidden"); byId("recoveryUsername").focus(); });
+  byId("hideRecovery").addEventListener("click", function () { byId("recoveryForm").classList.add("hidden"); byId("loginForm").classList.remove("hidden"); byId("showRecovery").classList.remove("hidden"); byId("loginUsername").focus(); });
+  byId("recoveryForm").addEventListener("submit", async function (event) {
+    event.preventDefault();
+    try {
+      var result = await api("/api/recover", {method: "POST", body: {username: byId("recoveryUsername").value.trim(), recoveryCode: byId("recoveryCode").value.trim(), newPassword: byId("recoveryPassword").value}});
+      setStatus(byId("recoveryStatus"), result.message, "success");
+      if (result.contactPageUrl) { byId("recoverySupport").innerHTML = 'If you have no valid code, use the configured <a href="' + escapeHtml(safeLink(result.contactPageUrl)) + '" target="_blank" rel="noopener noreferrer">Contact page</a>.'; }
+      byId("recoveryForm").reset();
+    } catch (error) { setStatus(byId("recoveryStatus"), error.message, "error"); }
+  });
+  byId("forcedPasswordForm").addEventListener("submit", async function (event) {
+    event.preventDefault();
+    try {
+      var result = await api("/api/account", {method: "PUT", body: {currentPassword: byId("forcedCurrentPassword").value, newPassword: byId("forcedNewPassword").value}});
+      showSignedOut(result.message || "Password changed. Sign in again to create recovery codes.");
+    } catch (error) { setStatus(byId("securitySetupStatus"), error.message, "error"); }
+  });
+  byId("generateRecoveryCodes").addEventListener("click", async function () {
+    try { showRecoveryCodeSet(await api("/api/account/recovery-codes/generate", {method: "POST", body: {currentPassword: byId("setupCurrentPassword").value}})); }
+    catch (error) { setStatus(byId("securitySetupStatus"), error.message, "error"); }
+  });
+  byId("copyRecoveryCodes").addEventListener("click", async function () { try { await navigator.clipboard.writeText(recoveryText()); setStatus(byId("securitySetupStatus"), "Recovery codes copied.", "success"); } catch (error) { setStatus(byId("securitySetupStatus"), "Copy was blocked. Select the codes manually.", "error"); } });
+  byId("downloadRecoveryCodes").addEventListener("click", function () { var url = URL.createObjectURL(new Blob([recoveryText()], {type: "text/plain"})); var anchor = document.createElement("a"); anchor.href = url; anchor.download = "ai-content-studio-recovery-codes.txt"; anchor.click(); window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000); });
+  byId("printRecoveryCodes").addEventListener("click", function () { window.print(); });
+  byId("confirmRecoveryCodes").addEventListener("click", async function () {
+    try {
+      await api("/api/account/recovery-codes/confirm", {method: "POST", body: {setId: session.recoverySetId, recoveryCode: byId("confirmRecoveryCode").value.trim()}});
+      var refreshed = await api("/api/session");
+      await showAuthenticated(refreshed, true);
+    } catch (error) { setStatus(byId("securitySetupStatus"), error.message, "error"); }
+  });
   byId("loginForm").addEventListener("submit", async function (event) { event.preventDefault(); setStatus(byId("loginStatus"), "Signing in…", ""); try { var payload = await api("/api/login", {method: "POST", body: {username: byId("loginUsername").value.trim(), password: byId("loginPassword").value}}); updateFooter(payload); await showAuthenticated(payload, true); byId("loginForm").reset(); } catch (error) { setStatus(byId("loginStatus"), error.message, "error"); } });
   byId("registerForm").addEventListener("submit", async function (event) { event.preventDefault(); setStatus(byId("registerStatus"), "Creating your workspace…", ""); try { var payload = await api("/api/register", {method: "POST", body: {displayName: byId("registerName").value.trim(), username: byId("registerUsername").value.trim(), password: byId("registerPassword").value}}); updateFooter(payload); await showAuthenticated(payload, true); byId("registerForm").reset(); } catch (error) { setStatus(byId("registerStatus"), error.message, "error"); } });
   byId("logout").addEventListener("click", async function () { try { await api("/api/logout", {method: "POST", body: {}}); } catch (error) { if (error.status !== 401) { window.alert(error.message); } } showSignedOut("You have been signed out."); });
@@ -679,24 +791,30 @@
   byId("removeCharacterImage").addEventListener("click", async function () { var character = activeProject().characters[characterIndex]; if (!window.confirm("Remove this private reference image?")) { return; } await api("/api/characters/" + encodeURIComponent(character.id) + "/image", {method: "DELETE"}); character.hasImage = false; byId("characterImageActions").classList.add("hidden"); render(); });
 
   byId("addPrompt").addEventListener("click", function () { if (activeProject()) { openPrompt(-1); } });
-  byId("promptForm").addEventListener("submit", function (event) {
+  byId("promptForm").addEventListener("submit", async function (event) {
     event.preventDefault();
     var existing = promptIndex >= 0 ? activeProject().prompts[promptIndex] : null;
-    var prompt = {id: existing ? existing.id : "prompt-" + crypto.randomUUID(), name: byId("promptName").value.trim(), category: byId("promptCategory").value, purpose: byId("promptPurpose").value.trim(), body: byId("promptBody").value, modelSettings: byId("promptSettings").value.trim(), updatedAt: new Date().toISOString()};
-    if (promptIndex < 0) { activeProject().prompts.push(prompt); }
+    var prompt = {id: existing ? existing.id : "prompt-" + crypto.randomUUID(), name: byId("promptName").value.trim(), category: byId("promptCategory").value, purpose: byId("promptPurpose").value.trim(), body: byId("promptBody").value, modelSettings: byId("promptSettings").value.trim(), sourceUrl: byId("promptSourceUrl").value.trim(), sourceNotes: byId("promptSourceNotes").value, updatedAt: new Date().toISOString()};
+    if (promptIndex < 0) { activeProject().prompts.push(prompt); promptIndex = activeProject().prompts.length - 1; }
     else { activeProject().prompts[promptIndex] = prompt; }
-    persist();
+    await persist();
+    var project = activeProject();
+    var path = "/api/projects/" + encodeURIComponent(project.id) + "/prompts/" + encodeURIComponent(prompt.id) + "/attachments";
+    var files = Array.from(byId("promptAttachments").files || []);
+    for (var index = 0; index < files.length; index += 1) { await api(path, {method: "PUT", headers: {"X-File-Name": encodeURIComponent(files[index].name)}, body: files[index]}); }
     render();
     byId("promptDialog").close();
   });
   byId("deletePrompt").addEventListener("click", function () {
-    if (promptIndex >= 0 && window.confirm("Delete this reusable prompt? Existing shot prompt snapshots will remain unchanged.")) {
+    if (promptIndex >= 0 && window.confirm("Delete this reusable prompt and all of its private attachments? Existing shot prompt snapshots will remain unchanged.")) {
       activeProject().prompts.splice(promptIndex, 1);
       persist();
       render();
       byId("promptDialog").close();
     }
   });
+  byId("promptBody").addEventListener("input", updatePromptPreview);
+  byId("promptAttachmentList").addEventListener("click", async function (event) { var button = event.target.closest("[data-delete-attachment]"); if (!button || !window.confirm("Permanently delete this private attachment?")) { return; } var project = activeProject(); var prompt = project.prompts[promptIndex]; var id = button.closest("[data-attachment-id]").dataset.attachmentId; await api("/api/projects/" + encodeURIComponent(project.id) + "/prompts/" + encodeURIComponent(prompt.id) + "/attachments/" + id, {method: "DELETE"}); await loadPromptAttachments(); });
   byId("promptGrid").addEventListener("click", async function (event) {
     var button = event.target.closest("[data-prompt-action]");
     if (!button) { return; }
@@ -735,9 +853,9 @@
     render();
   });
 
-  byId("export").addEventListener("click", function () { window.alert("This JSON export contains text records only. Uploaded images are not included. Back up the persistent data volume for a complete image-inclusive backup."); var clean = structuredClone(state); clean.projects.forEach(function (project) { project.characters.forEach(function (character) { delete character.hasImage; }); }); var anchor = document.createElement("a"); var url = URL.createObjectURL(new Blob([JSON.stringify(clean, null, 2)], {type: "application/json"})); anchor.href = url; anchor.download = "ai-content-studio-text-backup.json"; anchor.click(); window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000); });
+  byId("export").addEventListener("click", function () { window.alert("This JSON export contains text records only. Uploaded character images and prompt attachments are not included. Back up SQLite, the images directory, and the prompt-attachments directory together for a complete backup."); var clean = structuredClone(state); clean.projects.forEach(function (project) { project.characters.forEach(function (character) { delete character.hasImage; }); }); var anchor = document.createElement("a"); var url = URL.createObjectURL(new Blob([JSON.stringify(clean, null, 2)], {type: "application/json"})); anchor.href = url; anchor.download = "ai-content-studio-text-backup.json"; anchor.click(); window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000); });
   byId("import").addEventListener("click", function () { byId("file").click(); });
-  byId("file").addEventListener("change", async function (event) { var file = event.target.files && event.target.files[0]; if (!file) { return; } try { var parsed = JSON.parse(await file.text()); if (!parsed || (!Array.isArray(parsed.projects) && !Array.isArray(parsed.episodes))) { throw new Error("Invalid"); } var imported = migrateWorkspace(parsed); if (window.confirm("Replace every text record in your private workspace? Uploaded images are not restored by JSON import.")) { state = imported; await persist(); render(); goTo("overview", true); } } catch (error) { window.alert("This is not a valid AI Content Studio text backup."); } event.target.value = ""; });
+  byId("file").addEventListener("change", async function (event) { var file = event.target.files && event.target.files[0]; if (!file) { return; } try { var parsed = JSON.parse(await file.text()); if (!parsed || (!Array.isArray(parsed.projects) && !Array.isArray(parsed.episodes))) { throw new Error("Invalid"); } var imported = migrateWorkspace(parsed); if (window.confirm("Replace every text record in your private workspace? Uploaded character images and prompt attachments are not restored by JSON import.")) { state = imported; await persist(); render(); goTo("overview", true); } } catch (error) { window.alert("This is not a valid AI Content Studio text backup."); } event.target.value = ""; });
 
   byId("profileForm").addEventListener("submit", async function (event) { event.preventDefault(); try { session.user = (await api("/api/account", {method: "PUT", body: {displayName: byId("accountDisplayName").value.trim()}})).user; populateAccount(); setStatus(byId("profileStatus"), "Profile saved.", "success"); } catch (error) { setStatus(byId("profileStatus"), error.message, "error"); } });
   byId("passwordForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/account", {method: "PUT", body: {currentPassword: byId("currentPassword").value, newPassword: byId("newPassword").value}}); byId("passwordForm").reset(); showSignedOut(result.message || "Password changed. Sign in again."); } catch (error) { setStatus(byId("passwordStatus"), error.message, "error"); } });
@@ -755,13 +873,47 @@
       setStatus(byId("integrationStatus"), error.message, "error");
     }
   });
-  byId("registrationSettingsForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/admin/settings", {method: "PUT", body: {registrationEnabled: byId("registrationEnabled").checked}}); byId("registrationPrompt").dataset.enabled = result.registrationEnabled ? "true" : ""; setStatus(byId("adminSettingsStatus"), "Registration setting saved.", "success"); } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); } });
-  byId("userList").addEventListener("click", async function (event) { var button = event.target.closest("[data-user-action]"); if (!button) { return; } var row = button.closest("[data-user-row]"); var action = button.dataset.userAction; if (action === "delete" && !window.confirm("Permanently delete this account, its workspace, and all uploaded assets? This cannot be undone.")) { return; } if (["disable", "archive"].includes(action) && !window.confirm((action === "disable" ? "Disable sign-in" : "Archive this account") + " while retaining its workspace and uploads?")) { return; } try { if (action === "delete") { await api("/api/admin/users/" + row.dataset.userRow, {method: "DELETE"}); } else { await api("/api/admin/users/" + row.dataset.userRow, {method: "PUT", body: {action: action, role: row.querySelector("[data-user-role]").value}}); } await loadAdmin(); } catch (error) { window.alert(error.message); } });
+  byId("registrationSettingsForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/admin/settings", {method: "PUT", body: {registrationEnabled: byId("registrationEnabled").checked, contactPageUrl: byId("contactPageUrl").value.trim()}}); byId("registrationPrompt").dataset.enabled = result.registrationEnabled ? "true" : ""; setStatus(byId("adminSettingsStatus"), "Settings saved.", "success"); } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); } });
+  byId("userList").addEventListener("click", async function (event) {
+    var button = event.target.closest("[data-user-action]"); if (!button) { return; }
+    var row = button.closest("[data-user-row]"); var action = button.dataset.userAction;
+    if (action === "reset") { byId("resetPasswordForm").reset(); byId("resetUserId").value = row.dataset.userRow; byId("requirePasswordChange").checked = true; byId("temporaryPasswordResult").classList.add("hidden"); byId("resetPasswordDialog").showModal(); byId("temporaryPassword").focus(); return; }
+    if (action === "mcp") {
+      var permissions = {}; row.querySelectorAll("[data-mcp]").forEach(function (input) { permissions[input.dataset.mcp] = input.checked; });
+      try { await api("/api/admin/users/" + row.dataset.userRow + "/mcp", {method: "PUT", body: permissions}); await loadAdmin(); } catch (error) { window.alert(error.message); } return;
+    }
+    if (action === "delete" && !window.confirm("Permanently delete this account, its workspace, private files, grants, and tokens? This cannot be undone.")) { return; }
+    if (["disable", "archive"].includes(action) && !window.confirm((action === "disable" ? "Disable sign-in" : "Archive this account") + " while retaining its workspace and uploads?")) { return; }
+    try { if (action === "delete") { await api("/api/admin/users/" + row.dataset.userRow, {method: "DELETE"}); } else { await api("/api/admin/users/" + row.dataset.userRow, {method: "PUT", body: {action: action, role: row.querySelector("[data-user-role]").value}}); } await loadAdmin(); } catch (error) { window.alert(error.message); }
+  });
+
+  byId("resetPasswordForm").addEventListener("submit", async function (event) {
+    event.preventDefault();
+    try { var result = await api("/api/admin/users/" + byId("resetUserId").value + "/reset-password", {method: "POST", body: {temporaryPassword: byId("temporaryPassword").value, requireChange: byId("requirePasswordChange").checked}}); byId("temporaryPasswordDisplay").textContent = result.temporaryPassword; byId("temporaryPasswordResult").classList.remove("hidden"); setStatus(byId("resetPasswordStatus"), result.message, "success"); await loadAdmin(); }
+    catch (error) { setStatus(byId("resetPasswordStatus"), error.message, "error"); }
+  });
+  byId("copyTemporaryPassword").addEventListener("click", async function () { try { await navigator.clipboard.writeText(byId("temporaryPasswordDisplay").textContent); setStatus(byId("resetPasswordStatus"), "Temporary password copied.", "success"); } catch (error) { setStatus(byId("resetPasswordStatus"), "Copy was blocked. Select the password manually.", "error"); } });
+  byId("regenerateRecoveryCodes").addEventListener("click", function () { showSecuritySetup(session, true); byId("setupCurrentPassword").value = byId("regeneratePassword").value; });
 
   byId("addTool").addEventListener("click", function () { openToolDialog(null); });
   byId("toolDialog").addEventListener("close", clearToolForm);
-  byId("toolForm").addEventListener("submit", async function (event) { event.preventDefault(); var id = byId("toolId").value; var body = {action: "edit", name: byId("toolName").value.trim(), category: byId("toolCategory").value.trim(), url: byId("toolUrl").value.trim(), purpose: byId("toolPurpose").value.trim(), notes: byId("toolNotes").value.trim()}; try { await api(id ? "/api/admin/tools/" + id : "/api/admin/tools", {method: id ? "PUT" : "POST", body: body}); await loadTools(); byId("toolDialog").close(); } catch (error) { setStatus(byId("toolStatus"), error.message, "error"); } });
-  byId("toolGrid").addEventListener("click", async function (event) { var button = event.target.closest("[data-tool-action]"); if (!button) { return; } var card = button.closest("[data-tool-id]"); var tool = toolRecords.find(function (item) { return String(item.id) === card.dataset.toolId; }); var action = button.dataset.toolAction; if (action === "edit") { openToolDialog(tool); return; } if (action === "delete" && !window.confirm("Permanently delete this shared tool?")) { return; } try { if (action === "delete") { await api("/api/admin/tools/" + tool.id, {method: "DELETE"}); } else { await api("/api/admin/tools/" + tool.id, {method: "PUT", body: {action: action}}); } await loadTools(); } catch (error) { window.alert(error.message); } });
-
+  byId("toolForm").addEventListener("submit", async function (event) { event.preventDefault(); var id = byId("toolId").value; var body = {action: "edit", name: byId("toolName").value.trim(), category: byId("toolCategory").value.trim(), url: byId("toolUrl").value.trim(), purpose: byId("toolPurpose").value.trim(), notes: byId("toolNotes").value.trim()}; var prefix = session.user.role === "admin" ? "/api/admin/tools" : "/api/tools"; try { await api(prefix + (id ? "/" + id : ""), {method: id ? "PUT" : "POST", body: body}); await loadTools(); byId("toolDialog").close(); } catch (error) { setStatus(byId("toolStatus"), error.message, "error"); } });
+  byId("toolGrid").addEventListener("click", async function (event) {
+    var button = event.target.closest("[data-tool-action]"); if (!button) { return; }
+    var card = button.closest("[data-tool-id]"); var tool = toolRecords.find(function (item) { return String(item.id) === card.dataset.toolId; }); var action = button.dataset.toolAction;
+    if (action === "edit") { openToolDialog(tool); return; }
+    if (action === "assign") {
+      var users = JSON.parse(byId("userList").dataset.users || "[]").filter(function (user) { return user.role === "user" && user.active && !user.archived; });
+      var current = users.filter(function (user) { return tool.assignedUserIds.includes(user.id); }).map(function (user) { return user.username; }).join(", ");
+      var names = window.prompt("Enter usernames to assign, separated by commas. Leave blank to remove all assignments.", current); if (names === null) { return; }
+      var requested = names.split(",").map(function (name) { return name.trim().toLowerCase(); }).filter(Boolean);
+      var ids = users.filter(function (user) { return requested.includes(user.username.toLowerCase()); }).map(function (user) { return user.id; });
+      if (ids.length !== new Set(requested).size) { window.alert("One or more usernames were not active regular users."); return; }
+      await api("/api/admin/tools/" + tool.id, {method: "PUT", body: {action: "assign", userIds: ids}}); await loadTools(); return;
+    }
+    if (action === "delete" && !window.confirm("Permanently delete this tool and its assignments?")) { return; }
+    var prefix = session.user.role === "admin" ? "/api/admin/tools/" : "/api/tools/";
+    try { if (action === "delete") { await api(prefix + tool.id, {method: "DELETE"}); } else { await api(prefix + tool.id, {method: "PUT", body: {action: action}}); } await loadTools(); } catch (error) { window.alert(error.message); }
+  });
   bootstrap();
 })();

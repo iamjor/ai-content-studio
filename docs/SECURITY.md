@@ -23,3 +23,11 @@ SQLite, private images, `.env`, exports, and backups are excluded from Git. Prot
 ## Unsupported controls
 
 This personal project has no email verification, password-reset email, MFA, external identity provider, audit-log retention, or an audit log. Add an external access layer or keep registration closed when those controls are required.
+
+## Version 0.4 controls
+
+Recovery uses eight random single-use codes without email. Only salted PBKDF2 hashes are stored. Save the one-time plaintext set offline. Regeneration requires the current password and invalidates every older code. Recovery and administrator reset revoke browser sessions, OAuth grants, access and refresh tokens, and other connected access. Responses do not disclose whether a username exists. Configure only a public HTTPS support page, never a personal administrator email.
+
+Prompt attachments are private volume files with random names and account, project, and prompt-scoped database metadata. Supported formats and limits are documented in the technical reference. The application does not extract PDF or DOCX content. Treat a text-only JSON export and a complete volume backup as different artifacts.
+
+Regular users have no MCP entitlement by default. Read does not imply write, write does not imply archive or restore, and none of those imply permanent delete. Reducing any entitlement revokes existing OAuth grants and tokens immediately. Assigned administrator tools remain view and use only.

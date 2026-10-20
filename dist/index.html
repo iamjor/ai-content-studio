@@ -50,6 +50,34 @@
         <button class="btn primary wide" type="submit">Sign in</button>
       </form>
 
+        <button class="text-btn" id="showRecovery" type="button">Forgot password?</button>
+
+        <form id="recoveryForm" class="auth-form hidden" aria-labelledby="recoveryTitle">
+          <div class="form-heading"><div><div class="eyebrow">No email required</div><h2 id="recoveryTitle">Recover your account</h2></div><button class="icon-btn" id="hideRecovery" type="button" aria-label="Return to sign in">×</button></div>
+          <label class="field">Username<input id="recoveryUsername" type="text" autocomplete="username" required maxlength="40"></label>
+          <label class="field">Unused recovery code<input id="recoveryCode" type="text" autocomplete="one-time-code" required maxlength="80"></label>
+          <label class="field">New password<input id="recoveryPassword" type="password" autocomplete="new-password" required minlength="12" maxlength="256"></label>
+          <p class="field-help" id="recoverySupport">Responses do not reveal whether an account exists. If you have no valid code, contact the site administrator.</p>
+          <p class="form-status" id="recoveryStatus" role="status" aria-live="polite"></p>
+          <button class="btn primary wide" type="submit">Reset password</button>
+        </form>
+
+        <section id="securitySetup" class="auth-form hidden" aria-labelledby="securitySetupTitle">
+          <div class="eyebrow">Required security setup</div><h2 id="securitySetupTitle">Secure your account</h2>
+          <form id="forcedPasswordForm" class="hidden">
+            <p>Your temporary password must be replaced before entering the dashboard.</p>
+            <label class="field">Temporary password<input id="forcedCurrentPassword" type="password" autocomplete="current-password" maxlength="256"></label>
+            <label class="field">New password<input id="forcedNewPassword" type="password" autocomplete="new-password" minlength="12" maxlength="256"></label>
+            <button class="btn primary wide" type="submit">Set new password</button>
+          </form>
+          <div id="recoverySetupFlow" class="hidden">
+            <p>Generate eight single-use codes. Save them privately, then enter one code to confirm the set.</p>
+            <label class="field hidden" id="setupPasswordWrap">Current password<input id="setupCurrentPassword" type="password" autocomplete="current-password" maxlength="256"></label>
+            <button class="btn primary wide" id="generateRecoveryCodes" type="button">Generate recovery codes</button>
+            <div id="recoveryCodeDisplay" class="hidden"><pre id="recoveryCodes" class="recovery-codes"></pre><div class="action-row"><button class="btn" id="copyRecoveryCodes" type="button">Copy</button><button class="btn" id="downloadRecoveryCodes" type="button">Download text file</button><button class="btn" id="printRecoveryCodes" type="button">Print</button></div><label class="field">Confirm with one code<input id="confirmRecoveryCode" type="text" maxlength="80"></label><button class="btn primary wide" id="confirmRecoveryCodes" type="button">Confirm and enter dashboard</button></div>
+          </div>
+          <p class="form-status" id="securitySetupStatus" role="status" aria-live="polite"></p>
+        </section>
       <div id="registrationPrompt" class="auth-switch hidden">
         <span>New to the studio?</span>
         <button class="text-btn" id="showRegister" type="button">Create an account</button>
@@ -221,7 +249,7 @@
         </section>
 
         <section class="section" id="tools" aria-labelledby="toolsTitle">
-          <div class="rowhead"><div><h2 id="toolsTitle">Production tools</h2><p>An administrator-managed shared catalog.</p></div><div class="action-row hidden" id="toolAdminActions"><label class="compact-field" id="toolFilterWrap">View<select id="toolFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addTool" type="button">+ Add tool</button></div></div>
+          <div class="rowhead"><div><h2 id="toolsTitle">Production tools</h2><p>Your private tools plus admin tools assigned to you.</p></div><div class="action-row" id="toolAdminActions"><label class="compact-field" id="toolFilterWrap">View<select id="toolFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addTool" type="button">+ Add tool</button></div></div>
           <div class="stack" id="toolGrid"></div>
           <div class="rowhead"><div><h2>Cost and rights</h2></div></div>
           <div class="notice">Cloud video credits and free exports can change. Keep clean masters and approved character references. Use music with rights for every platform where you publish.</div>
@@ -257,8 +285,9 @@
               <p class="form-status" id="passwordStatus" role="status"></p>
               <button class="btn primary" type="submit">Change password</button>
             </form>
+            <section class="panel"><h3>Recovery codes</h3><p>Regenerate eight codes after confirming your current password. Older codes become invalid immediately.</p><label class="field">Current password<input id="regeneratePassword" type="password" autocomplete="current-password" maxlength="256"></label><button class="btn" id="regenerateRecoveryCodes" type="button">Regenerate codes</button><p class="form-status" id="regenerateStatus" role="status"></p></section>
           </div>
-          <section class="panel integrations-panel" aria-labelledby="integrationsTitle">
+          <section class="panel integrations-panel" id="integrationsPanel" aria-labelledby="integrationsTitle">
             <div class="rowhead">
               <div>
                 <h3 id="integrationsTitle">Connected integrations</h3>
@@ -280,14 +309,15 @@
           </div>
           <form class="panel registration-setting" id="registrationSettingsForm">
             <div>
-              <h3>Self-registration</h3>
+              <h3>Registration and public support</h3>
               <p>Keep this off unless you are ready to accept new accounts.</p>
             </div>
             <label class="switch-row">
               <input id="registrationEnabled" type="checkbox">
               <span>Allow registration</span>
             </label>
-            <button class="btn primary" type="submit">Save setting</button>
+            <label class="field">Public Contact page URL<input id="contactPageUrl" type="url" maxlength="500" placeholder="https://example.com/contact"><span class="field-help">Optional. This public HTTPS page is shown during password recovery. Do not enter a personal email address.</span></label>
+            <button class="btn primary" type="submit">Save settings</button>
             <p class="form-status" id="adminSettingsStatus" role="status"></p>
           </form>
           <div class="rowhead"><div><h2>Users</h2><p>Disable or archive without losing data. Permanent deletion removes only the selected account workspace and uploads.</p></div><label class="compact-field">View<select id="userFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
@@ -388,12 +418,29 @@
       <label class="field">Name<input id="promptName" type="text" required maxlength="120"></label>
       <label class="field">Purpose / category<select id="promptCategory"><option>Style</option><option>Character</option><option>Prop</option><option>Location</option><option>Text-to-image</option><option>Image-to-video</option><option>Negative / avoid</option><option>Other</option></select></label>
       <label class="field">Purpose notes<input id="promptPurpose" type="text" maxlength="300"></label>
-      <label class="field">Prompt body<textarea id="promptBody" required maxlength="20000"></textarea></label>
+      <label class="field">Prompt body in Markdown<textarea id="promptBody" required maxlength="120000"></textarea><span class="field-help">Up to 120,000 characters, suitable for roughly 10 to 20 document pages. Raw Markdown is preserved exactly.</span></label>
+      <div class="panel"><h3>Sanitized preview</h3><div id="promptPreview" class="markdown-preview"></div></div>
+      <label class="field">Optional HTTPS source URL<input id="promptSourceUrl" type="url" maxlength="500" pattern="https://.*"></label>
+      <label class="field">Optional source notes<textarea id="promptSourceNotes" class="textarea-medium" maxlength="20000"></textarea></label>
       <label class="field">Optional model / settings<textarea id="promptSettings" class="textarea-short" maxlength="5000"></textarea></label>
+      <label class="field">Private attachments<input id="promptAttachments" type="file" multiple accept=".pdf,.docx,.md,.markdown,.txt,image/png,image/jpeg,image/webp"><span class="field-help">PDF, DOCX, Markdown, text, PNG, JPEG, or WebP. Maximum 20 MB each, 20 files and 100 MB per prompt. PDF and DOCX text is not extracted.</span></label>
+      <div class="stack" id="promptAttachmentList"></div>
       <div class="modalactions"><button class="btn danger hidden" id="deletePrompt" type="button">Delete prompt</button><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Save prompt</button></div>
     </form>
   </dialog>
 
+  <dialog class="modal" id="resetPasswordDialog" aria-labelledby="resetPasswordTitle">
+    <form id="resetPasswordForm">
+      <div class="eyebrow">Security-sensitive action</div><h2 id="resetPasswordTitle">Reset password</h2>
+      <input id="resetUserId" type="hidden">
+      <p>This revokes browser sessions, OAuth grants and tokens, and all previous recovery codes.</p>
+      <label class="field">Temporary password<input id="temporaryPassword" type="text" minlength="12" maxlength="256"><span class="field-help">Leave blank to generate a strong value.</span></label>
+      <label class="switch-row"><input id="requirePasswordChange" type="checkbox" checked><span>Require password change at next login</span></label>
+      <div id="temporaryPasswordResult" class="hidden"><p>Copy this password now. It cannot be viewed again.</p><pre id="temporaryPasswordDisplay" class="recovery-codes"></pre><button class="btn" id="copyTemporaryPassword" type="button">Copy temporary password</button></div>
+      <p class="form-status" id="resetPasswordStatus" role="status"></p>
+      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn danger" type="submit">Reset password and revoke access</button></div>
+    </form>
+  </dialog>
   <script src="/seed.js"></script>
   <script src="/app.js"></script>
 </body>

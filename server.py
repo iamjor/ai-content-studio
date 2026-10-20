@@ -6,6 +6,7 @@ import hmac
 import html
 import http.client
 import ipaddress
+import io
 import json
 import os
 import re
@@ -14,25 +15,33 @@ import shutil
 import sqlite3
 import sys
 import time
+import zipfile
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 APP_NAME = "AI Content Studio"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT / "dist"
 DB_PATH = Path(os.environ.get("AICS_DB_PATH", "/data/studio.sqlite3"))
 IMAGE_ROOT_OVERRIDE = os.environ.get("AICS_IMAGE_ROOT", "").strip()
 MAX_BYTES = 2_000_000
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_PROMPT_BODY = 120_000
+MAX_PROMPT_NOTES = 20_000
+MAX_PROMPT_ATTACHMENTS = 20
+MAX_PROMPT_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_PROMPT_ATTACHMENT_TOTAL = 100 * 1024 * 1024
 AUTH_MAX_BYTES = 4_096
 OAUTH_MAX_BYTES = 32_768
 OAUTH_CODE_SECONDS = 5 * 60
 OAUTH_ACCESS_SECONDS = 60 * 60
 OAUTH_REFRESH_SECONDS = 30 * 24 * 60 * 60
-OAUTH_SCOPES = {"aics.read", "aics.write"}
+OAUTH_SCOPES = {
+    "aics.read", "aics.write", "aics.archive", "aics.delete",
+}
 OAUTH_PUBLIC_WINDOW_SECONDS = 60
 OAUTH_REGISTRATION_LIMIT = 10
 OAUTH_AUTHORIZATION_LIMIT = 30
@@ -97,6 +106,9 @@ COOKIE_SECURE = os.environ.get("AICS_COOKIE_SECURE", "1").strip().lower() not in
 REGISTRATION_DEFAULT = os.environ.get(
     "AICS_REGISTRATION_ENABLED", "0"
 ).strip().lower() in {"1", "true", "yes"}
+RECOVERY_CODE_COUNT = 8
+RECOVERY_LIMIT = 5
+RECOVERY_SETUP_SECONDS = 15 * 60
 ADMIN_USERNAME = os.environ.get(
     "AICS_ADMIN_USERNAME", os.environ.get("AICS_USERNAME", "")
 ).strip()
@@ -120,6 +132,11 @@ TOOL_SEEDS = (
 def image_root():
     """Return the configured image directory or one beside the active database."""
     return Path(IMAGE_ROOT_OVERRIDE) if IMAGE_ROOT_OVERRIDE else DB_PATH.parent / "images"
+
+
+def attachment_root():
+    """Return the private prompt-attachment directory in persistent storage."""
+    return DB_PATH.parent / "prompt-attachments"
 
 
 def parse_trusted_proxy_networks(value):
@@ -163,6 +180,41 @@ def forwarded_mcp_headers(headers):
     }
 
 
+
+def filter_mcp_tools_response(request_body, response_body, scopes):
+    """Remove tools the current token cannot invoke from tools/list output."""
+    try:
+        request = json.loads(request_body)
+        response = json.loads(response_body)
+    except (UnicodeDecodeError, ValueError, TypeError, RecursionError):
+        return response_body
+    if not isinstance(request, dict) or request.get("method") != "tools/list" or not isinstance(response, dict):
+        return response_body
+    result = response.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        return response_body
+    archive_tools = {"archive_content_record", "restore_content_record"}
+    delete_tools = {
+        "delete_project", "delete_episode", "delete_character",
+        "delete_project_prompt", "delete_episode_shot", "delete_production_gate",
+    }
+    read_tools = {
+        "get_workspace_summary", "list_projects", "get_project", "get_project_bible",
+        "list_episodes", "get_episode", "list_characters", "get_character",
+        "list_prompts", "list_production_gates",
+    }
+    allowed = []
+    for tool in result["tools"]:
+        name = tool.get("name") if isinstance(tool, dict) else ""
+        required = (
+            "aics.read" if name in read_tools else
+            "aics.archive" if name in archive_tools else
+            "aics.delete" if name in delete_tools else "aics.write"
+        )
+        if required in scopes:
+            allowed.append(tool)
+    result["tools"] = allowed
+    return json.dumps(response, separators=(",", ":")).encode("utf-8")
 def parse_mcp_diagnostic_request(body):
     """Return safe protocol metadata and values that error text must redact."""
     try:
@@ -473,6 +525,55 @@ def detect_image_type(data):
     return ""
 
 
+def generate_recovery_codes():
+    """Create eight high-entropy human-readable codes for one-time display."""
+    return [secrets.token_hex(12).upper() for _ in range(RECOVERY_CODE_COUNT)]
+
+
+def hash_recovery_code(code, salt=None):
+    """Hash one recovery code with a unique salt for offline resistance."""
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", code.encode("utf-8"), salt, PASSWORD_ITERATIONS)
+    return salt.hex(), digest.hex()
+
+
+def verify_recovery_code(code, salt_hex, digest_hex):
+    """Compare a supplied recovery code with a stored salted hash."""
+    try:
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", code.strip().upper().encode("utf-8"),
+            bytes.fromhex(salt_hex), PASSWORD_ITERATIONS,
+        ).hex()
+    except (AttributeError, ValueError):
+        return False
+    return hmac.compare_digest(actual, digest_hex)
+
+
+def detect_prompt_attachment(data, filename, claimed_type):
+    """Validate supported attachment signatures and return a trusted MIME type."""
+    image_type = detect_image_type(data)
+    if image_type:
+        return image_type if claimed_type in {image_type, "application/octet-stream"} else ""
+    lowered = filename.lower()
+    if data.startswith(b"%PDF-") and b"%%EOF" in data[-2048:]:
+        return "application/pdf" if lowered.endswith(".pdf") else ""
+    if data.startswith(b"PK\x03\x04") and lowered.endswith(".docx"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                names = set(archive.namelist())
+                if "[Content_Types].xml" in names and "word/document.xml" in names:
+                    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        except (ValueError, zipfile.BadZipFile):
+            return ""
+    if lowered.endswith((".md", ".markdown", ".txt")):
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+        return "text/markdown" if lowered.endswith((".md", ".markdown")) else "text/plain"
+    return ""
+
+
 def normalize_workspace_data(data):
     """Add compatible planning defaults without replacing existing records or IDs."""
     if not isinstance(data, dict) or not isinstance(data.get("projects"), list):
@@ -723,6 +824,53 @@ def setup():
                 request_count INTEGER NOT NULL,
                 PRIMARY KEY(scope_hash, purpose)
             );
+            CREATE TABLE IF NOT EXISTS recovery_codes (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                set_id TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                confirmed_at INTEGER,
+                used_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS recovery_codes_user
+                ON recovery_codes(user_id, set_id);
+            CREATE TABLE IF NOT EXISTS security_events (
+                id INTEGER PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                subject_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS prompt_attachments (
+                id INTEGER PRIMARY KEY,
+                storage_id TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                project_id TEXT NOT NULL,
+                prompt_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS prompt_attachments_scope
+                ON prompt_attachments(user_id, project_id, prompt_id);
+            CREATE TABLE IF NOT EXISTS tool_assignments (
+                tool_id INTEGER NOT NULL REFERENCES tools(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(tool_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS mcp_permissions (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+                can_read INTEGER NOT NULL DEFAULT 0 CHECK(can_read IN (0, 1)),
+                can_write INTEGER NOT NULL DEFAULT 0 CHECK(can_write IN (0, 1)),
+                can_archive INTEGER NOT NULL DEFAULT 0 CHECK(can_archive IN (0, 1)),
+                can_delete INTEGER NOT NULL DEFAULT 0 CHECK(can_delete IN (0, 1)),
+                updated_at INTEGER NOT NULL
+            );
             """
         )
         user_columns = {
@@ -730,6 +878,21 @@ def setup():
         }
         if "archived_at" not in user_columns:
             database.execute("ALTER TABLE users ADD COLUMN archived_at INTEGER")
+        if "must_change_password" not in user_columns:
+            database.execute(
+                "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"
+            )
+        if "recovery_setup_required" not in user_columns:
+            database.execute(
+                "ALTER TABLE users ADD COLUMN recovery_setup_required INTEGER NOT NULL DEFAULT 1"
+            )
+        tool_columns = {
+            row["name"] for row in database.execute("PRAGMA table_info(tools)")
+        }
+        if "owner_user_id" not in tool_columns:
+            database.execute(
+                "ALTER TABLE tools ADD COLUMN owner_user_id INTEGER REFERENCES users(id)"
+            )
         token_columns = {
             row["name"] for row in database.execute("PRAGMA table_info(oauth_tokens)")
         }
@@ -760,7 +923,7 @@ def setup():
                 "registration_enabled",
                 "1" if REGISTRATION_DEFAULT else "0",
             )
-        set_setting(database, "schema_version", "5")
+        set_setting(database, "schema_version", "6")
 
         admin = database.execute(
             "SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1"
@@ -825,6 +988,7 @@ def setup():
                     (json.dumps(data), row["user_id"]),
                 )
     image_root().mkdir(parents=True, exist_ok=True)
+    attachment_root().mkdir(parents=True, exist_ok=True)
 
 
 def session_token_hash(token):
@@ -859,7 +1023,40 @@ def public_user(row):
         "active": bool(row["is_active"]),
         "archived": bool(row["archived_at"]),
         "theme": row["theme"],
+        "mustChangePassword": bool(row["must_change_password"]),
+        "recoverySetupRequired": bool(row["recovery_setup_required"]),
     }
+
+
+def mcp_permissions(database, user_id, role=None):
+    """Return current granular MCP entitlements, with full admin compatibility."""
+    if role is None:
+        user = database.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+        role = user["role"] if user else ""
+    if role == "admin":
+        return {"enabled": True, "read": True, "write": True, "archive": True, "delete": True}
+    row = database.execute("SELECT * FROM mcp_permissions WHERE user_id=?", (user_id,)).fetchone()
+    return {
+        "enabled": bool(row and row["enabled"]),
+        "read": bool(row and row["can_read"]),
+        "write": bool(row and row["can_write"]),
+        "archive": bool(row and row["can_archive"]),
+        "delete": bool(row and row["can_delete"]),
+    }
+
+
+def permitted_oauth_scopes(database, user_id, requested):
+    """Intersect requested OAuth scopes with the account current entitlements."""
+    permissions = mcp_permissions(database, user_id)
+    if not permissions["enabled"]:
+        return ""
+    mapping = {
+        "aics.read": "read", "aics.write": "write",
+        "aics.archive": "archive", "aics.delete": "delete",
+    }
+    return " ".join(sorted(
+        scope for scope in requested.split() if permissions[mapping[scope]]
+    ))
 
 
 def resolve_access_token(raw_token, required_scope=None, touch=False):
@@ -873,7 +1070,7 @@ def resolve_access_token(raw_token, required_scope=None, touch=False):
             """
             SELECT t.token_hash, t.expires_at, g.id AS grant_id,
                    COALESCE(NULLIF(t.scopes, ''), g.scopes) AS scopes,
-                   g.user_id, c.client_id, c.client_name
+                   g.user_id, c.client_id, c.client_name, u.role
             FROM oauth_tokens t
             JOIN oauth_grants g ON g.id=t.grant_id
             JOIN oauth_clients c ON c.client_id=g.client_id
@@ -884,10 +1081,13 @@ def resolve_access_token(raw_token, required_scope=None, touch=False):
             """,
             (digest, now),
         ).fetchone()
-        if not row or (
-            required_scope and required_scope not in row["scopes"].split()
-        ):
+        if not row:
             return None
+        effective = permitted_oauth_scopes(database, row["user_id"], row["scopes"])
+        if not effective or (required_scope and required_scope not in effective.split()):
+            return None
+        row = dict(row)
+        row["scopes"] = effective
         if touch:
             database.execute(
                 "UPDATE oauth_tokens SET used_at=? WHERE token_hash=?",
@@ -1045,7 +1245,8 @@ class Handler(BaseHTTPRequestHandler):
                 SELECT
                     s.token_hash, s.csrf_token, s.expires_at,
                     u.id, u.username, u.display_name, u.role, u.is_active,
-                    u.archived_at, u.theme
+                    u.archived_at, u.theme, u.must_change_password,
+                    u.recovery_setup_required
                 FROM sessions s
                 JOIN users u ON u.id=s.user_id
                 WHERE s.token_hash=?
@@ -1102,12 +1303,16 @@ class Handler(BaseHTTPRequestHandler):
         """Build the authenticated bootstrap response for the current browser."""
         with connect() as database:
             allow_registration = registration_enabled(database)
+            contact_url = get_setting(database, "contact_page_url", "")
+            permissions = mcp_permissions(database, session["id"], session["role"])
         return {
             "authenticated": True,
             "user": public_user(session),
             "csrfToken": session["csrf_token"],
             "expiresAt": session["expires_at"],
             "registrationEnabled": allow_registration,
+            "contactPageUrl": contact_url,
+            "mcpPermissions": permissions,
             "appName": APP_NAME,
             "version": APP_VERSION,
         }
@@ -1155,11 +1360,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json_reply(200, self.session_payload(session))
             with connect() as database:
                 allow_registration = registration_enabled(database)
+                contact_url = get_setting(database, "contact_page_url", "")
             return self.json_reply(
                 200,
                 {
                     "authenticated": False,
                     "registrationEnabled": allow_registration,
+                    "contactPageUrl": contact_url,
                     "appName": APP_NAME,
                     "version": APP_VERSION,
                 },
@@ -1178,6 +1385,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.get_integrations(session)
         if path == "/api/tools":
             return self.get_tools(session)
+        if path.startswith("/api/projects/") and "/prompts/" in path and "/attachments" in path:
+            return self.list_prompt_attachments(path, session)
         if path.startswith("/api/characters/") and path.endswith("/image"):
             return self.get_character_image(path, session)
         if path == "/api/admin/users":
@@ -1185,7 +1394,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/admin/settings":
             with connect() as database:
                 enabled = registration_enabled(database)
-            return self.json_reply(200, {"registrationEnabled": enabled})
+                contact_url = get_setting(database, "contact_page_url", "")
+            return self.json_reply(200, {"registrationEnabled": enabled, "contactPageUrl": contact_url})
         return self.json_reply(404, {"error": "Not found"})
 
     def do_POST(self):
@@ -1207,11 +1417,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.login()
         if path == "/api/register":
             return self.register()
-        if path == "/api/admin/tools":
+        if path == "/api/recover":
+            return self.recover_password()
+        if path == "/api/admin/tools" or path == "/api/tools":
+            session = self.require_session(admin=path.startswith("/api/admin/"), csrf=True)
+            if not session:
+                return None
+            return self.create_tool(session)
+        if path == "/api/account/recovery-codes/generate":
+            session = self.require_session(csrf=True)
+            if not session:
+                return None
+            return self.generate_account_recovery_codes(session)
+        if path == "/api/account/recovery-codes/confirm":
+            session = self.require_session(csrf=True)
+            if not session:
+                return None
+            return self.confirm_account_recovery_codes(session)
+        if path.startswith("/api/admin/users/") and path.endswith("/reset-password"):
             session = self.require_session(admin=True, csrf=True)
             if not session:
                 return None
-            return self.create_tool()
+            return self.admin_reset_password(path, session)
         if path == "/api/logout":
             session = self.require_session(csrf=True)
             if not session:
@@ -1240,14 +1467,20 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if path == "/api/workspace":
             return self.put_workspace(session)
+        if path.startswith("/api/projects/") and "/prompts/" in path and path.endswith("/attachments"):
+            return self.put_prompt_attachment(path, session)
         if path == "/api/account":
             return self.update_account(session)
         if path == "/api/admin/settings":
             return self.update_admin_settings()
+        if path.startswith("/api/admin/users/") and path.endswith("/mcp"):
+            return self.update_user_mcp_permissions(path)
         if path.startswith("/api/admin/users/"):
             return self.update_user(path, session)
         if path.startswith("/api/admin/tools/"):
-            return self.update_tool(path)
+            return self.update_tool(path, session)
+        if path.startswith("/api/tools/"):
+            return self.update_tool(path, session)
         if path.startswith("/api/characters/") and path.endswith("/image"):
             return self.put_character_image(path, session)
         return self.json_reply(404, {"error": "Not found"})
@@ -1267,9 +1500,13 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/admin/users/"):
             return self.delete_user(path, session)
         if path.startswith("/api/admin/tools/"):
-            return self.delete_tool(path)
+            return self.delete_tool(path, session)
+        if path.startswith("/api/tools/"):
+            return self.delete_tool(path, session)
         if path.startswith("/api/characters/") and path.endswith("/image"):
             return self.delete_character_image(path, session)
+        if path.startswith("/api/projects/") and "/prompts/" in path and "/attachments/" in path:
+            return self.delete_prompt_attachment(path, session)
         if path.startswith("/api/account/integrations/"):
             return self.revoke_integration(path, session)
         return self.json_reply(404, {"error": "Not found"})
@@ -1518,6 +1755,10 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             )
         session = self.current_session()
+        display_scopes = request_data["scope"]
+        if session:
+            with connect() as database:
+                display_scopes = permitted_oauth_scopes(database, session["id"], display_scopes)
         identity = (
             "<p>Signed in as <strong>"
             + html.escape(session["display_name"])
@@ -1538,7 +1779,7 @@ class Handler(BaseHTTPRequestHandler):
                 else "Create and update your project planning records"
             )
             + "</li>"
-            for scope in request_data["scope"].split()
+            for scope in display_scopes.split()
         )
         page = (
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -1659,6 +1900,13 @@ class Handler(BaseHTTPRequestHandler):
             with connect() as database:
                 self.release_login_attempt(database, attempt_scope)
             user_id = user["id"]
+        with connect() as database:
+            account = database.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            effective_scopes = permitted_oauth_scopes(database, user_id, request_data["scope"])
+        if (not account or (account["role"] != "admin" and (
+                account["must_change_password"] or account["recovery_setup_required"]
+            )) or not effective_scopes):
+            return self.oauth_error(403, "access_denied", "MCP access is not available for this account.")
         raw_code = secrets.token_urlsafe(32)
         with connect() as database:
             database.execute(
@@ -1670,7 +1918,7 @@ class Handler(BaseHTTPRequestHandler):
                 """,
                 (
                     token_hash(raw_code), user_id, request_data["client_id"],
-                    redirect_uri, request_data["scope"],
+                    redirect_uri, effective_scopes,
                     request_data["code_challenge"], request_data["resource"],
                     int(time.time()) + OAUTH_CODE_SECONDS,
                 ),
@@ -1761,6 +2009,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.oauth_error(
                     400, "invalid_grant", "The authorization code is invalid."
                 )
+            effective_scopes = permitted_oauth_scopes(database, row["user_id"], row["scopes"])
+            if not effective_scopes:
+                return self.oauth_error(400, "invalid_grant", "MCP access was revoked.")
             database.execute(
                 """
                 INSERT INTO oauth_grants
@@ -1770,7 +2021,7 @@ class Handler(BaseHTTPRequestHandler):
                     scopes=excluded.scopes, created_at=excluded.created_at,
                     revoked_at=NULL
                 """,
-                (row["user_id"], client_id, row["scopes"], now),
+                (row["user_id"], client_id, effective_scopes, now),
             )
             grant = database.execute(
                 "SELECT id FROM oauth_grants WHERE user_id=? AND client_id=?",
@@ -1781,9 +2032,9 @@ class Handler(BaseHTTPRequestHandler):
                 (now, grant["id"]),
             )
             access, refresh = self.issue_oauth_pair(
-                database, grant["id"], row["scopes"]
+                database, grant["id"], effective_scopes
             )
-        return self.oauth_token_response(access, refresh, row["scopes"])
+        return self.oauth_token_response(access, refresh, effective_scopes)
 
     def oauth_refresh_token(self, form):
         """Rotate a refresh token and revoke its family on replay."""
@@ -1796,7 +2047,7 @@ class Handler(BaseHTTPRequestHandler):
                 """
                 SELECT t.*,
                        COALESCE(NULLIF(t.scopes, ''), g.scopes) AS effective_scopes,
-                       g.client_id, g.revoked_at AS grant_revoked
+                       g.client_id, g.user_id, g.revoked_at AS grant_revoked
                 FROM oauth_tokens t
                 JOIN oauth_grants g ON g.id=t.grant_id
                 WHERE t.token_hash=? AND t.token_type='refresh'
@@ -1826,10 +2077,12 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except ValueError:
                 return self.oauth_error(400, "invalid_scope", "Invalid scope.")
-            if not set(scopes.split()).issubset(
-                set(row["effective_scopes"].split())
-            ):
+            if not set(scopes.split()).issubset(set(row["effective_scopes"].split())):
                 return self.oauth_error(400, "invalid_scope", "Scope cannot expand.")
+            scopes = permitted_oauth_scopes(database, row["user_id"], scopes)
+            if not scopes:
+                revoke_user_oauth(database, row["user_id"], now)
+                return self.oauth_error(400, "invalid_grant", "MCP access was revoked.")
             database.execute(
                 "UPDATE oauth_tokens SET used_at=? WHERE token_hash=?",
                 (now, row["token_hash"]),
@@ -2007,6 +2260,7 @@ class Handler(BaseHTTPRequestHandler):
             connection.request(self.command, "/mcp", body=body, headers=forwarded)
             response = connection.getresponse()
             response_body = response.read(MAX_BYTES + 1)
+            response_body = filter_mcp_tools_response(body, response_body, set(identity["scopes"].split()))
             if len(response_body) > MAX_BYTES:
                 connection.close()
                 return self.json_reply(502, {"error": "MCP response is too large."})
@@ -2218,6 +2472,8 @@ class Handler(BaseHTTPRequestHandler):
             value = self.read_json(AUTH_MAX_BYTES)
         except ValueError:
             return self.json_reply(400, {"error": "Enter a username and password."})
+        if set(value) != {"username", "password"}:
+            return self.json_reply(400, {"error": "Enter a username and password."})
         username = value.get("username", "")
         password = value.get("password", "")
         if (
@@ -2290,8 +2546,8 @@ class Handler(BaseHTTPRequestHandler):
             value = self.read_json(AUTH_MAX_BYTES)
         except ValueError:
             return self.json_reply(400, {"error": "Complete all registration fields."})
-        if "role" in value:
-            return self.json_reply(400, {"error": "Account roles cannot be requested."})
+        if set(value) - {"username", "displayName", "password"}:
+            return self.json_reply(400, {"error": "Account roles or unsupported fields cannot be requested."})
         username = value.get("username", "")
         display_name = value.get("displayName", "")
         password = value.get("password", "")
@@ -2389,6 +2645,340 @@ class Handler(BaseHTTPRequestHandler):
             [("Set-Cookie", self.session_cookie(raw_token, SESSION_SECONDS))],
         )
 
+    def generic_recovery_reply(self):
+        """Return one non-enumerating response for every recovery outcome."""
+        with connect() as database:
+            contact_url = get_setting(database, "contact_page_url", "")
+        return self.json_reply(200, {
+            "ok": True,
+            "message": "If the account and unused recovery code were valid, the password was changed. Sign in with the new password.",
+            "contactPageUrl": contact_url,
+        }, [("Set-Cookie", self.session_cookie("", 0))])
+
+    def recover_password(self):
+        """Consume one recovery code atomically and revoke every connected session."""
+        try:
+            value = self.read_json(AUTH_MAX_BYTES)
+        except ValueError:
+            return self.generic_recovery_reply()
+        if set(value) != {"username", "recoveryCode", "newPassword"}:
+            return self.generic_recovery_reply()
+        username = value.get("username")
+        code = value.get("recoveryCode")
+        password = value.get("newPassword")
+        if not all(isinstance(item, str) for item in (username, code, password)):
+            return self.generic_recovery_reply()
+        if len(username) > 40 or len(code) > 80 or not validate_password(password):
+            return self.generic_recovery_reply()
+        now = int(time.time())
+        source_scope = self.attempt_scope("recovery-source")
+        account_scope = hashlib.sha256(
+            ("recovery-account\0" + username.casefold()).encode("utf-8")
+        ).hexdigest()
+        with connect() as database:
+            accepted, remaining, _ = self.reserve_attempt(
+                database, source_scope, now, RECOVERY_LIMIT
+            )
+        if not accepted:
+            return self.json_reply(429, {"error": "Too many attempts. Try again later."}, {"Retry-After": str(remaining)})
+        with connect() as database:
+            accepted, remaining, _ = self.reserve_attempt(
+                database, account_scope, now, RECOVERY_LIMIT
+            )
+        if not accepted:
+            return self.json_reply(429, {"error": "Too many attempts. Try again later."}, {"Retry-After": str(remaining)})
+        password_hash = hash_password(password)
+        success = False
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            user = database.execute(
+                "SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)
+            ).fetchone()
+            rows = database.execute(
+                """
+                SELECT * FROM recovery_codes
+                WHERE user_id=? AND confirmed_at IS NOT NULL AND used_at IS NULL
+                """, (user["id"] if user else -1,)
+            ).fetchall()
+            matched = next((row for row in rows if verify_recovery_code(
+                code, row["salt"], row["code_hash"]
+            )), None)
+            if user and user["is_active"] and not user["archived_at"] and matched:
+                changed = database.execute(
+                    "UPDATE recovery_codes SET used_at=? WHERE id=? AND used_at IS NULL",
+                    (now, matched["id"]),
+                )
+                if changed.rowcount == 1:
+                    database.execute(
+                        """
+                        UPDATE users SET password_hash=?, must_change_password=0,
+                            recovery_setup_required=0, updated_at=? WHERE id=?
+                        """, (password_hash, now, user["id"]),
+                    )
+                    database.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+                    revoke_user_oauth(database, user["id"], now)
+                    database.execute(
+                        "INSERT INTO security_events (event_type, subject_user_id, created_at) VALUES ('password_recovered', ?, ?)",
+                        (user["id"], now),
+                    )
+                    success = True
+        if success:
+            with connect() as database:
+                self.release_login_attempt(database, source_scope)
+            with connect() as database:
+                self.release_login_attempt(database, account_scope)
+        return self.generic_recovery_reply()
+
+    def generate_account_recovery_codes(self, session):
+        """Create a replacement recovery set and return plaintext exactly once."""
+        try:
+            value = self.read_json(AUTH_MAX_BYTES)
+        except ValueError:
+            return self.json_reply(400, {"error": "Invalid recovery setup."})
+        if set(value) - {"currentPassword"}:
+            return self.json_reply(400, {"error": "Invalid recovery setup."})
+        with connect() as database:
+            user = database.execute("SELECT * FROM users WHERE id=?", (session["id"],)).fetchone()
+        existing_setup = not bool(user["recovery_setup_required"])
+        if existing_setup:
+            current = value.get("currentPassword", "")
+            if not isinstance(current, str) or not verify_password(current, user["password_hash"]):
+                return self.json_reply(403, {"error": "Current password is incorrect."})
+        codes = generate_recovery_codes()
+        set_id = secrets.token_hex(16)
+        now = int(time.time())
+        hashed = [(set_id, *hash_recovery_code(code), now) for code in codes]
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            database.execute("DELETE FROM recovery_codes WHERE user_id=?", (session["id"],))
+            database.executemany(
+                """
+                INSERT INTO recovery_codes
+                    (user_id, set_id, salt, code_hash, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """, ((session["id"], *item) for item in hashed),
+            )
+            database.execute(
+                "INSERT INTO security_events (event_type, actor_user_id, subject_user_id, created_at) VALUES ('recovery_codes_generated', ?, ?, ?)",
+                (session["id"], session["id"], now),
+            )
+        return self.json_reply(201, {"codes": codes, "setId": set_id})
+
+    def confirm_account_recovery_codes(self, session):
+        """Confirm possession of one freshly generated code without consuming it."""
+        try:
+            value = self.read_json(AUTH_MAX_BYTES)
+        except ValueError:
+            return self.json_reply(400, {"error": "Enter one recovery code."})
+        if set(value) != {"setId", "recoveryCode"}:
+            return self.json_reply(400, {"error": "Enter one recovery code."})
+        set_id, code = value["setId"], value["recoveryCode"]
+        if not isinstance(set_id, str) or len(set_id) != 32 or not isinstance(code, str) or len(code) > 80:
+            return self.json_reply(400, {"error": "Enter one recovery code."})
+        now = int(time.time())
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            rows = database.execute(
+                "SELECT * FROM recovery_codes WHERE user_id=? AND set_id=? AND confirmed_at IS NULL AND created_at>?",
+                (session["id"], set_id, now - RECOVERY_SETUP_SECONDS),
+            ).fetchall()
+            if not any(verify_recovery_code(code, row["salt"], row["code_hash"]) for row in rows):
+                return self.json_reply(400, {"error": "That code did not match the new set."})
+            database.execute(
+                "UPDATE recovery_codes SET confirmed_at=? WHERE user_id=? AND set_id=?",
+                (now, session["id"], set_id),
+            )
+            database.execute(
+                "UPDATE users SET recovery_setup_required=0, updated_at=? WHERE id=?",
+                (now, session["id"]),
+            )
+        return self.json_reply(200, {"ok": True})
+
+    def admin_reset_password(self, path, session):
+        """Replace one password, invalidate credentials, and return the temporary value once."""
+        try:
+            user_id = int(path.split("/")[4])
+            value = self.read_json(AUTH_MAX_BYTES)
+        except (ValueError, IndexError):
+            return self.json_reply(400, {"error": "Invalid password reset."})
+        if set(value) - {"temporaryPassword", "requireChange"}:
+            return self.json_reply(400, {"error": "Invalid password reset."})
+        require_change = value.get("requireChange", True)
+        if type(require_change) is not bool:
+            return self.json_reply(400, {"error": "Require change must be true or false."})
+        temporary = value.get("temporaryPassword") or secrets.token_urlsafe(18)
+        if not validate_password(temporary):
+            return self.json_reply(400, {"error": "Use a temporary password between 12 and 256 characters."})
+        now = int(time.time())
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            target = database.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if not target:
+                return self.json_reply(404, {"error": "User not found."})
+            database.execute(
+                """
+                UPDATE users SET password_hash=?, must_change_password=?,
+                    recovery_setup_required=1, updated_at=? WHERE id=?
+                """, (hash_password(temporary), 1 if require_change else 0, now, user_id),
+            )
+            database.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            database.execute("DELETE FROM recovery_codes WHERE user_id=?", (user_id,))
+            database.execute("DELETE FROM oauth_codes WHERE user_id=?", (user_id,))
+            revoke_user_oauth(database, user_id, now)
+            database.execute(
+                "INSERT INTO security_events (event_type, actor_user_id, subject_user_id, created_at) VALUES ('admin_password_reset', ?, ?, ?)",
+                (session["id"], user_id, now),
+            )
+        headers = [("Set-Cookie", self.session_cookie("", 0))] if user_id == session["id"] else None
+        return self.json_reply(200, {
+            "ok": True, "temporaryPassword": temporary,
+            "requireChange": require_change,
+            "message": "Copy the temporary password now. It will not be shown again.",
+        }, headers)
+
+    def prompt_scope(self, database, user_id, project_id, prompt_id):
+        """Confirm a project and prompt ID belong to the authenticated workspace."""
+        row = database.execute("SELECT data FROM workspaces WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            return False
+        try:
+            data = json.loads(row["data"])
+        except json.JSONDecodeError:
+            return False
+        return any(
+            prompt.get("id") == prompt_id
+            for project in data.get("projects", []) if isinstance(project, dict) and project.get("id") == project_id
+            for prompt in project.get("prompts", []) if isinstance(prompt, dict)
+        )
+
+    def attachment_path_parts(self, path):
+        """Parse a project-scoped prompt attachment route conservatively."""
+        parts = path.strip("/").split("/")
+        if len(parts) not in {6, 7} or parts[:2] != ["api", "projects"] or parts[3] != "prompts" or parts[5] != "attachments":
+            raise ValueError("Invalid attachment path")
+        project_id, prompt_id = parts[2], parts[4]
+        if not IDENTIFIER_PATTERN.fullmatch(project_id) or not IDENTIFIER_PATTERN.fullmatch(prompt_id):
+            raise ValueError("Invalid attachment scope")
+        attachment_id = int(parts[6]) if len(parts) == 7 else None
+        return project_id, prompt_id, attachment_id
+
+    @staticmethod
+    def serialize_attachment(row):
+        """Return private attachment metadata without its random storage name."""
+        return {
+            "id": row["id"], "filename": row["filename"],
+            "mimeType": row["mime_type"], "byteSize": row["byte_size"],
+            "createdAt": row["created_at"],
+        }
+
+    def list_prompt_attachments(self, path, session):
+        """List files attached to one caller-owned project prompt."""
+        try:
+            project_id, prompt_id, attachment_id = self.attachment_path_parts(path)
+        except ValueError:
+            return self.json_reply(404, {"error": "Prompt not found."})
+        if attachment_id is not None:
+            return self.get_prompt_attachment(path, session)
+        with connect() as database:
+            if not self.prompt_scope(database, session["id"], project_id, prompt_id):
+                return self.json_reply(404, {"error": "Prompt not found."})
+            rows = database.execute(
+                "SELECT * FROM prompt_attachments WHERE user_id=? AND project_id=? AND prompt_id=? ORDER BY id",
+                (session["id"], project_id, prompt_id),
+            ).fetchall()
+        return self.json_reply(200, {"attachments": [self.serialize_attachment(row) for row in rows]})
+
+    def get_prompt_attachment(self, path, session):
+        """Download or safely preview one authenticated private attachment."""
+        try:
+            project_id, prompt_id, attachment_id = self.attachment_path_parts(path)
+        except ValueError:
+            return self.json_reply(404, {"error": "Attachment not found."})
+        with connect() as database:
+            row = database.execute(
+                "SELECT * FROM prompt_attachments WHERE id=? AND user_id=? AND project_id=? AND prompt_id=?",
+                (attachment_id, session["id"], project_id, prompt_id),
+            ).fetchone()
+        if not row:
+            return self.json_reply(404, {"error": "Attachment not found."})
+        try:
+            data = (attachment_root() / str(session["id"]) / row["storage_id"]).read_bytes()
+        except FileNotFoundError:
+            return self.json_reply(404, {"error": "Attachment not found."})
+        disposition = "inline" if row["mime_type"].startswith("image/") else "attachment"
+        safe_name = row["filename"].replace('"', "")
+        return self.reply(200, data, row["mime_type"], {
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'{disposition}; filename="{safe_name}"',
+            "X-Content-Type-Options": "nosniff",
+        })
+
+    def put_prompt_attachment(self, path, session):
+        """Validate and persist one private prompt attachment with bounded totals."""
+        try:
+            project_id, prompt_id, attachment_id = self.attachment_path_parts(path)
+            if attachment_id is not None:
+                raise ValueError("Replace is not supported")
+            filename = unquote(self.headers.get("X-File-Name", ""))
+            claimed = self.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip().lower()
+            if not filename or len(filename) > 200 or any(character in filename for character in "/\\\0"):
+                raise ValueError("Invalid filename")
+            data = self.read_body(MAX_PROMPT_ATTACHMENT_BYTES)
+            mime_type = detect_prompt_attachment(data, filename, claimed)
+            if not mime_type:
+                raise ValueError("Invalid file")
+        except ValueError:
+            return self.json_reply(400, {"error": "Use a valid PDF, DOCX, Markdown, text, PNG, JPEG, or WebP file up to 20 MB."})
+        storage_id = secrets.token_hex(24)
+        directory = attachment_root() / str(session["id"])
+        directory.mkdir(parents=True, exist_ok=True)
+        location = directory / storage_id
+        location.write_bytes(data)
+        try:
+            with connect() as database:
+                database.execute("BEGIN IMMEDIATE")
+                if not self.prompt_scope(database, session["id"], project_id, prompt_id):
+                    location.unlink(missing_ok=True)
+                    return self.json_reply(404, {"error": "Prompt not found."})
+                count, total = database.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM prompt_attachments WHERE user_id=? AND project_id=? AND prompt_id=?",
+                    (session["id"], project_id, prompt_id),
+                ).fetchone()
+                if count >= MAX_PROMPT_ATTACHMENTS or total + len(data) > MAX_PROMPT_ATTACHMENT_TOTAL:
+                    location.unlink(missing_ok=True)
+                    return self.json_reply(413, {"error": "This prompt reached its 20-file or 100 MB attachment limit."})
+                cursor = database.execute(
+                    """
+                    INSERT INTO prompt_attachments
+                        (storage_id, user_id, project_id, prompt_id, filename, mime_type, byte_size, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (storage_id, session["id"], project_id, prompt_id, filename, mime_type, len(data), int(time.time())),
+                )
+                row = database.execute("SELECT * FROM prompt_attachments WHERE id=?", (cursor.lastrowid,)).fetchone()
+        except Exception:
+            location.unlink(missing_ok=True)
+            raise
+        return self.json_reply(201, {"attachment": self.serialize_attachment(row)})
+
+    def delete_prompt_attachment(self, path, session):
+        """Delete one caller-owned attachment record before removing its bytes."""
+        try:
+            project_id, prompt_id, attachment_id = self.attachment_path_parts(path)
+            if attachment_id is None:
+                raise ValueError("Missing attachment")
+        except ValueError:
+            return self.json_reply(400, {"error": "Invalid attachment."})
+        with connect() as database:
+            row = database.execute(
+                "SELECT * FROM prompt_attachments WHERE id=? AND user_id=? AND project_id=? AND prompt_id=?",
+                (attachment_id, session["id"], project_id, prompt_id),
+            ).fetchone()
+            if not row:
+                return self.json_reply(404, {"error": "Attachment not found."})
+            database.execute("DELETE FROM prompt_attachments WHERE id=?", (attachment_id,))
+        (attachment_root() / str(session["id"]) / row["storage_id"]).unlink(missing_ok=True)
+        return self.json_reply(200, {"ok": True})
+
     def get_workspace(self, session):
         """Return only the workspace belonging to the authenticated user."""
         with connect() as database:
@@ -2426,6 +3016,8 @@ class Handler(BaseHTTPRequestHandler):
         """Save one user's validated workspace with optimistic conflict detection."""
         try:
             value = self.read_json()
+            if set(value) != {"revision", "data"}:
+                raise ValueError("Unknown workspace field")
             revision, data = value["revision"], value["data"]
             if (
                 type(revision) is not int
@@ -2441,6 +3033,27 @@ class Handler(BaseHTTPRequestHandler):
                 for project in data["projects"]
             ):
                 raise ValueError("Invalid projects")
+            if len(data["projects"]) > 100:
+                raise ValueError("Too many projects")
+            prompt_fields = {
+                "id", "name", "category", "purpose", "body", "modelSettings",
+                "updatedAt", "archived", "sourceUrl", "sourceNotes",
+            }
+            for project in data["projects"]:
+                prompts = project.get("prompts", [])
+                if not isinstance(prompts, list) or len(prompts) > 100:
+                    raise ValueError("Invalid prompts")
+                for prompt in prompts:
+                    if not isinstance(prompt, dict) or set(prompt) - prompt_fields:
+                        raise ValueError("Invalid prompt fields")
+                    if (not isinstance(prompt.get("body", ""), str)
+                            or len(prompt.get("body", "")) > MAX_PROMPT_BODY
+                            or not isinstance(prompt.get("sourceNotes", ""), str)
+                            or len(prompt.get("sourceNotes", "")) > MAX_PROMPT_NOTES):
+                        raise ValueError("Prompt text is too long")
+                    source_url = prompt.get("sourceUrl", "")
+                    if source_url and not validate_https_url(source_url):
+                        raise ValueError("Invalid prompt source URL")
         except (ValueError, KeyError, TypeError):
             return self.json_reply(400, {"error": "Invalid workspace."})
         data, _ = normalize_workspace_data(data)
@@ -2450,7 +3063,13 @@ class Handler(BaseHTTPRequestHandler):
             for character in project.get("characters", [])
             if isinstance(character, dict) and character.get("id")
         }
+        prompt_scopes = {
+            (project.get("id"), prompt.get("id"))
+            for project in data["projects"] if isinstance(project, dict)
+            for prompt in project.get("prompts", []) if isinstance(prompt, dict)
+        }
         removed_files = []
+        removed_attachments = []
         with connect() as database:
             database.execute("BEGIN IMMEDIATE")
             image_rows = database.execute(
@@ -2462,6 +3081,11 @@ class Handler(BaseHTTPRequestHandler):
                 for row in image_rows
                 if row["character_id"] not in character_ids
             ]
+            attachment_rows = database.execute(
+                "SELECT storage_id, project_id, prompt_id FROM prompt_attachments WHERE user_id=?",
+                (session["id"],),
+            ).fetchall()
+            removed_attachments = [row["storage_id"] for row in attachment_rows if (row["project_id"], row["prompt_id"]) not in prompt_scopes]
             if revision == 0:
                 result = database.execute(
                     """
@@ -2495,8 +3119,15 @@ class Handler(BaseHTTPRequestHandler):
                     "DELETE FROM character_images WHERE storage_id=?",
                     ((storage_id,) for storage_id in removed_files),
                 )
+            if removed_attachments:
+                database.executemany(
+                    "DELETE FROM prompt_attachments WHERE storage_id=?",
+                    ((storage_id,) for storage_id in removed_attachments),
+                )
         for storage_id in removed_files:
             (image_root() / str(session["id"]) / storage_id).unlink(missing_ok=True)
+        for storage_id in removed_attachments:
+            (attachment_root() / str(session["id"]) / storage_id).unlink(missing_ok=True)
         return self.json_reply(200, {"revision": revision + 1})
 
     def update_account(self, session):
@@ -2504,6 +3135,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             value = self.read_json(AUTH_MAX_BYTES)
         except ValueError:
+            return self.json_reply(400, {"error": "Invalid account update."})
+        if set(value) - {"displayName", "theme", "currentPassword", "newPassword"}:
             return self.json_reply(400, {"error": "Invalid account update."})
         updates = []
         parameters = []
@@ -2545,6 +3178,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             updates.append("password_hash=?")
             parameters.append(hash_password(new_password))
+            updates.append("must_change_password=0")
 
         if not updates:
             return self.json_reply(400, {"error": "No account changes supplied."})
@@ -2594,9 +3228,7 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as database:
             rows = database.execute(
                 """
-                SELECT id, username, display_name, role, is_active,
-                       archived_at, theme, created_at
-                FROM users
+                SELECT * FROM users
                 ORDER BY created_at, id
                 """
             ).fetchall()
@@ -2604,26 +3236,36 @@ class Handler(BaseHTTPRequestHandler):
         for row in rows:
             item = public_user(row)
             item["createdAt"] = row["created_at"]
+            with connect() as permission_database:
+                item["mcpPermissions"] = mcp_permissions(permission_database, row["id"], row["role"])
             users.append(item)
         return self.json_reply(200, {"users": users})
 
     def update_admin_settings(self):
-        """Allow administrators to open or close regular-user registration."""
+        """Update bounded public registration and support-link settings."""
         try:
-            value = self.read_json()
+            value = self.read_json(AUTH_MAX_BYTES)
         except ValueError:
             return self.json_reply(400, {"error": "Invalid settings update."})
-        enabled = value.get("registrationEnabled")
-        if type(enabled) is not bool:
-            return self.json_reply(
-                400, {"error": "Registration setting must be true or false."}
-            )
+        if not value or set(value) - {"registrationEnabled", "contactPageUrl"}:
+            return self.json_reply(400, {"error": "Invalid settings update."})
+        if "registrationEnabled" in value and type(value["registrationEnabled"]) is not bool:
+            return self.json_reply(400, {"error": "Registration setting must be true or false."})
+        contact_url = value.get("contactPageUrl")
+        if contact_url is not None:
+            if not isinstance(contact_url, str):
+                return self.json_reply(400, {"error": "Contact page URL must be HTTPS."})
+            contact_url = contact_url.strip()
+            if contact_url and not validate_https_url(contact_url):
+                return self.json_reply(400, {"error": "Contact page URL must be HTTPS."})
         with connect() as database:
-            set_setting(
-                database, "registration_enabled", "1" if enabled else "0"
-            )
-        return self.json_reply(200, {"registrationEnabled": enabled})
-
+            if "registrationEnabled" in value:
+                set_setting(database, "registration_enabled", "1" if value["registrationEnabled"] else "0")
+            if contact_url is not None:
+                set_setting(database, "contact_page_url", contact_url)
+            enabled = registration_enabled(database)
+            saved_contact = get_setting(database, "contact_page_url", "")
+        return self.json_reply(200, {"registrationEnabled": enabled, "contactPageUrl": saved_contact})
     def active_admin_count(self, database):
         """Count administrators who are active and not archived."""
         return database.execute(
@@ -2633,12 +3275,57 @@ class Handler(BaseHTTPRequestHandler):
             """
         ).fetchone()[0]
 
+    def update_user_mcp_permissions(self, path):
+        """Set independent MCP entitlements and revoke tokens on every reduction."""
+        try:
+            user_id = int(path.split("/")[4])
+            value = self.read_json(AUTH_MAX_BYTES)
+        except (ValueError, IndexError):
+            return self.json_reply(400, {"error": "Invalid MCP permissions."})
+        expected = {"enabled", "read", "write", "archive", "delete"}
+        if set(value) != expected or any(type(value[key]) is not bool for key in expected):
+            return self.json_reply(400, {"error": "Supply every MCP permission as true or false."})
+        if value["enabled"] and not any(value[key] for key in expected - {"enabled"}):
+            value["read"] = True
+        if not value["enabled"] and any(value[key] for key in expected - {"enabled"}):
+            return self.json_reply(400, {"error": "Disabled MCP access cannot include permissions."})
+        now = int(time.time())
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            user = database.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if not user:
+                return self.json_reply(404, {"error": "User not found."})
+            if user["role"] == "admin":
+                return self.json_reply(409, {"error": "Administrators retain full MCP access."})
+            old = mcp_permissions(database, user_id, user["role"])
+            database.execute(
+                """
+                INSERT INTO mcp_permissions
+                    (user_id, enabled, can_read, can_write, can_archive, can_delete, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    enabled=excluded.enabled, can_read=excluded.can_read,
+                    can_write=excluded.can_write, can_archive=excluded.can_archive,
+                    can_delete=excluded.can_delete, updated_at=excluded.updated_at
+                """, (user_id, int(value["enabled"]), int(value["read"]), int(value["write"]), int(value["archive"]), int(value["delete"]), now),
+            )
+            reduced = any(old[key] and not value[key] for key in expected)
+            if reduced:
+                revoke_user_oauth(database, user_id, now)
+            database.execute(
+                "INSERT INTO security_events (event_type, subject_user_id, created_at) VALUES ('mcp_permissions_changed', ?, ?)",
+                (user_id, now),
+            )
+        return self.json_reply(200, {"mcpPermissions": value})
+
     def update_user(self, path, session):
         """Apply one explicit account lifecycle or role action."""
         try:
             user_id = int(path.rsplit("/", 1)[1])
             value = self.read_json(AUTH_MAX_BYTES)
         except (ValueError, IndexError):
+            return self.json_reply(400, {"error": "Invalid user update."})
+        if set(value) - {"action", "role", "active"}:
             return self.json_reply(400, {"error": "Invalid user update."})
         action = value.get("action")
         role = value.get("role")
@@ -2749,117 +3436,14 @@ class Handler(BaseHTTPRequestHandler):
                 )
             database.execute("DELETE FROM users WHERE id=?", (user_id,))
         shutil.rmtree(image_root() / str(user_id), ignore_errors=True)
+        shutil.rmtree(attachment_root() / str(user_id), ignore_errors=True)
         return self.json_reply(200, {"ok": True})
 
-    def tool_payload(self):
-        """Validate and normalize an administrator-supplied catalog record."""
-        value = self.read_json(AUTH_MAX_BYTES)
-        fields = {
-            key: value.get(key, "")
-            for key in ("name", "category", "url", "purpose", "notes")
-        }
-        if not all(isinstance(item, str) for item in fields.values()):
-            raise ValueError("Invalid tool fields")
-        fields = {key: item.strip() for key, item in fields.items()}
-        if (
-            not fields["name"]
-            or len(fields["name"]) > 100
-            or not fields["category"]
-            or len(fields["category"]) > 60
-            or not fields["purpose"]
-            or len(fields["purpose"]) > 300
-            or len(fields["notes"]) > 500
-            or not validate_https_url(fields["url"])
-        ):
-            raise ValueError("Invalid tool fields")
-        return fields
-
-    @staticmethod
-    def serialize_tool(row):
-        """Serialize a catalog record without exposing storage details."""
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            "category": row["category"],
-            "url": row["url"],
-            "purpose": row["purpose"],
-            "notes": row["notes"],
-            "archived": bool(row["archived_at"]),
-        }
-
-    def get_tools(self, session):
-        """List active tools for members and archived tools for administrators."""
-        with connect() as database:
-            if session["role"] == "admin":
-                rows = database.execute(
-                    "SELECT * FROM tools ORDER BY category, name, id"
-                ).fetchall()
-            else:
-                rows = database.execute(
-                    """
-                    SELECT * FROM tools WHERE archived_at IS NULL
-                    ORDER BY category, name, id
-                    """
-                ).fetchall()
-        return self.json_reply(200, {"tools": [self.serialize_tool(row) for row in rows]})
-
-    def create_tool(self):
-        """Add a validated shared tool catalog record."""
-        try:
-            value = self.tool_payload()
-        except ValueError:
-            return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
-        now = int(time.time())
-        with connect() as database:
-            cursor = database.execute(
-                """
-                INSERT INTO tools
-                    (name, category, url, purpose, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (*value.values(), now, now),
-            )
-            row = database.execute(
-                "SELECT * FROM tools WHERE id=?", (cursor.lastrowid,)
-            ).fetchone()
-        return self.json_reply(201, {"tool": self.serialize_tool(row)})
-
-    def update_tool(self, path):
-        """Edit, archive, or restore a shared catalog record."""
-        try:
-            tool_id = int(path.rsplit("/", 1)[1])
-            value = self.read_json(AUTH_MAX_BYTES)
-        except (ValueError, IndexError):
-            return self.json_reply(400, {"error": "Invalid tool update."})
-        action = value.get("action", "edit")
-        with connect() as database:
-            if not database.execute("SELECT 1 FROM tools WHERE id=?", (tool_id,)).fetchone():
-                return self.json_reply(404, {"error": "Tool not found."})
-            now = int(time.time())
-            if action in {"archive", "restore"}:
-                database.execute(
-                    "UPDATE tools SET archived_at=?, updated_at=? WHERE id=?",
-                    (now if action == "archive" else None, now, tool_id),
-                )
-            elif action == "edit":
-                try:
-                    fields = self.tool_payload_from_value(value)
-                except ValueError:
-                    return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
-                database.execute(
-                    """
-                    UPDATE tools SET name=?, category=?, url=?, purpose=?, notes=?,
-                        updated_at=? WHERE id=?
-                    """,
-                    (*fields.values(), now, tool_id),
-                )
-            else:
-                return self.json_reply(400, {"error": "Choose a valid tool action."})
-            row = database.execute("SELECT * FROM tools WHERE id=?", (tool_id,)).fetchone()
-        return self.json_reply(200, {"tool": self.serialize_tool(row)})
-
     def tool_payload_from_value(self, value):
-        """Validate a decoded catalog payload used by update requests."""
+        """Validate a decoded tool payload and reject unsupported fields."""
+        allowed = {"action", "name", "category", "url", "purpose", "notes", "userIds"}
+        if not isinstance(value, dict) or set(value) - allowed:
+            raise ValueError("Invalid tool fields")
         fields = {key: value.get(key, "") for key in ("name", "category", "url", "purpose", "notes")}
         if not all(isinstance(item, str) for item in fields.values()):
             raise ValueError("Invalid tool fields")
@@ -2871,16 +3455,135 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Invalid tool fields")
         return fields
 
-    def delete_tool(self, path):
-        """Permanently delete one catalog record."""
+    def tool_payload(self):
+        """Read and validate a bounded tool catalog record."""
+        return self.tool_payload_from_value(self.read_json(AUTH_MAX_BYTES))
+
+    @staticmethod
+    def serialize_tool(row, session):
+        """Serialize ownership and capabilities without exposing assignments."""
+        owner_id = row["owner_user_id"]
+        admin = session["role"] == "admin"
+        own = owner_id == session["id"]
+        return {
+            "id": row["id"], "name": row["name"], "category": row["category"],
+            "url": row["url"], "purpose": row["purpose"], "notes": row["notes"],
+            "archived": bool(row["archived_at"]), "ownerUserId": owner_id,
+            "adminCreated": owner_id is None, "canManage": admin or own,
+            "assigned": bool(row["assigned"]) if "assigned" in row.keys() else False,
+            "assignedUserIds": ([int(item) for item in row["assigned_user_ids"].split(",") if item] if "assigned_user_ids" in row.keys() and row["assigned_user_ids"] else []),
+        }
+
+    def get_tools(self, session):
+        """List only owned or explicitly assigned tools for regular users."""
+        with connect() as database:
+            if session["role"] == "admin":
+                rows = database.execute(
+                    """SELECT tools.*, 0 AS assigned, COALESCE((
+                        SELECT GROUP_CONCAT(a.user_id) FROM tool_assignments a WHERE a.tool_id=tools.id
+                    ), '') AS assigned_user_ids FROM tools ORDER BY category, name, id"""
+                ).fetchall()
+            else:
+                rows = database.execute(
+                    """
+                    SELECT tools.*, EXISTS(
+                        SELECT 1 FROM tool_assignments a
+                        WHERE a.tool_id=tools.id AND a.user_id=?
+                    ) AS assigned
+                    FROM tools
+                    WHERE tools.archived_at IS NULL AND (
+                        tools.owner_user_id=? OR (
+                            tools.owner_user_id IS NULL AND EXISTS(
+                                SELECT 1 FROM tool_assignments a
+                                WHERE a.tool_id=tools.id AND a.user_id=?
+                            )
+                        )
+                    )
+                    ORDER BY category, name, id
+                    """, (session["id"], session["id"], session["id"]),
+                ).fetchall()
+        return self.json_reply(200, {"tools": [self.serialize_tool(row, session) for row in rows]})
+
+    def create_tool(self, session):
+        """Create an admin catalog tool or a private user-owned tool."""
+        try:
+            value = self.tool_payload()
+        except ValueError:
+            return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
+        now = int(time.time())
+        owner_id = None if session["role"] == "admin" else session["id"]
+        with connect() as database:
+            cursor = database.execute(
+                """
+                INSERT INTO tools
+                    (name, category, url, purpose, notes, owner_user_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (*value.values(), owner_id, now, now),
+            )
+            row = database.execute("SELECT tools.*, 0 AS assigned FROM tools WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return self.json_reply(201, {"tool": self.serialize_tool(row, session)})
+
+    def update_tool(self, path, session):
+        """Edit a manageable tool or apply admin-only lifecycle and assignments."""
+        try:
+            tool_id = int(path.rstrip("/").rsplit("/", 1)[1])
+            value = self.read_json(AUTH_MAX_BYTES)
+        except (ValueError, IndexError):
+            return self.json_reply(400, {"error": "Invalid tool update."})
+        action = value.get("action", "edit")
+        with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            row = database.execute("SELECT * FROM tools WHERE id=?", (tool_id,)).fetchone()
+            if not row:
+                return self.json_reply(404, {"error": "Tool not found."})
+            admin = session["role"] == "admin"
+            own = row["owner_user_id"] == session["id"]
+            if not admin and not own:
+                return self.json_reply(403, {"error": "This assigned tool is view and use only."})
+            now = int(time.time())
+            if action in {"archive", "restore"}:
+                database.execute("UPDATE tools SET archived_at=?, updated_at=? WHERE id=?", (now if action == "archive" else None, now, tool_id))
+            elif action == "assign" and admin and row["owner_user_id"] is None:
+                user_ids = value.get("userIds")
+                if not isinstance(user_ids, list) or len(user_ids) > MAX_USERS or any(type(item) is not int for item in user_ids):
+                    return self.json_reply(400, {"error": "Choose valid users."})
+                valid = {item["id"] for item in database.execute(
+                    "SELECT id FROM users WHERE role='user' AND is_active=1 AND archived_at IS NULL"
+                ).fetchall()}
+                if set(user_ids) - valid:
+                    return self.json_reply(400, {"error": "Choose valid users."})
+                database.execute("DELETE FROM tool_assignments WHERE tool_id=?", (tool_id,))
+                database.executemany(
+                    "INSERT INTO tool_assignments (tool_id, user_id, created_at) VALUES (?, ?, ?)",
+                    ((tool_id, user_id, now) for user_id in sorted(set(user_ids))),
+                )
+            elif action == "edit":
+                try:
+                    fields = self.tool_payload_from_value(value)
+                except ValueError:
+                    return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
+                database.execute(
+                    "UPDATE tools SET name=?, category=?, url=?, purpose=?, notes=?, updated_at=? WHERE id=?",
+                    (*fields.values(), now, tool_id),
+                )
+            else:
+                return self.json_reply(400, {"error": "Choose a valid tool action."})
+            updated = database.execute("SELECT tools.*, 0 AS assigned FROM tools WHERE id=?", (tool_id,)).fetchone()
+        return self.json_reply(200, {"tool": self.serialize_tool(updated, session)})
+
+    def delete_tool(self, path, session):
+        """Delete a user-owned tool, or any tool when requested by an admin."""
         try:
             tool_id = int(path.rsplit("/", 1)[1])
         except (ValueError, IndexError):
             return self.json_reply(400, {"error": "Invalid tool."})
         with connect() as database:
-            result = database.execute("DELETE FROM tools WHERE id=?", (tool_id,))
-        if result.rowcount != 1:
-            return self.json_reply(404, {"error": "Tool not found."})
+            row = database.execute("SELECT owner_user_id FROM tools WHERE id=?", (tool_id,)).fetchone()
+            if not row:
+                return self.json_reply(404, {"error": "Tool not found."})
+            if session["role"] != "admin" and row["owner_user_id"] != session["id"]:
+                return self.json_reply(403, {"error": "This assigned tool is view and use only."})
+            database.execute("DELETE FROM tools WHERE id=?", (tool_id,))
         return self.json_reply(200, {"ok": True})
 
     def character_id_from_path(self, path):

@@ -772,7 +772,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(session["authenticated"])
         self.assertFalse(session["registrationEnabled"])
-        self.assertEqual(session["version"], "0.3.0")
+        self.assertEqual(session["version"], "0.4.0")
 
     def test_02_admin_login_hashing_and_legacy_migration(self):
         """Hash the bootstrap password and assign legacy data to the initial admin."""
@@ -780,7 +780,7 @@ class ServerIntegrationTests(unittest.TestCase):
         status, payload, headers = admin.login(ADMIN_USERNAME, ADMIN_PASSWORD)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["user"]["role"], "admin")
-        self.assertEqual(payload["version"], "0.3.0")
+        self.assertEqual(payload["version"], "0.4.0")
         set_cookie = headers.get("Set-Cookie", "")
         self.assertIn("HttpOnly", set_cookie)
         self.assertIn("SameSite=Strict", set_cookie)
@@ -812,7 +812,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertTrue(stored.startswith("pbkdf2_sha256$"))
         self.assertNotIn(ADMIN_PASSWORD, stored)
         self.assertEqual(legacy_count, 1)
-        self.assertEqual(schema_version, "5")
+        self.assertEqual(schema_version, "6")
 
     def test_03_registration_policy_and_roles(self):
         """Keep signup admin-controlled and never accept a requested admin role."""
@@ -1335,7 +1335,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn("openToolDialog", script)
         self.assertIn('id="projectFilter"', html)
         self.assertIn('id="cImage"', html)
-        self.assertIn("Uploaded images are not included", script)
+        self.assertIn("prompt attachments are not included", script)
         self.assertIn('id="pLogline"', html)
         self.assertIn('id="episodeSynopsis"', html)
         self.assertIn('id="episodeBeats"', html)
@@ -2267,7 +2267,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 """
                 INSERT OR REPLACE INTO oauth_grants
                     (id, user_id, client_id, scopes, created_at, revoked_at)
-                VALUES (9001, ?, ?, 'aics.read aics.write', ?, NULL)
+                VALUES (9001, ?, ?, 'aics.read aics.write aics.archive aics.delete', ?, NULL)
                 """,
                 (user_id, client_id, now),
             )
@@ -2601,6 +2601,193 @@ class ServerIntegrationTests(unittest.TestCase):
                     0,
                 )
 
+
+    def test_21_recovery_setup_hashing_single_use_and_generic_response(self):
+        """Require confirmed hashed codes, consume one atomically, and avoid enumeration."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        client = TestClient(self.base_url)
+        status, registered, _ = client.register(
+            "recoverable", "Recovery User", "initial-password-123"
+        )
+        self.assertEqual(status, 201, registered)
+        self.assertTrue(registered["user"]["recoverySetupRequired"])
+        status, generated, _ = client.request(
+            "/api/account/recovery-codes/generate", method="POST", payload={}
+        )
+        self.assertEqual(status, 201, generated)
+        self.assertEqual(len(generated["codes"]), 8)
+        self.assertEqual(len(set(generated["codes"])), 8)
+        with sqlite3.connect(self.database_path) as database:
+            rows = database.execute(
+                "SELECT salt, code_hash FROM recovery_codes rc JOIN users u ON u.id=rc.user_id WHERE u.username='recoverable'"
+            ).fetchall()
+        self.assertEqual(len(rows), 8)
+        self.assertFalse(any(code in str(rows) for code in generated["codes"]))
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                "UPDATE recovery_codes SET created_at=? WHERE set_id=?",
+                (int(time.time()) - server.RECOVERY_SETUP_SECONDS - 1, generated["setId"]),
+            )
+        expired = client.request(
+            "/api/account/recovery-codes/confirm", method="POST",
+            payload={"setId": generated["setId"], "recoveryCode": generated["codes"][0]},
+        )
+        self.assertEqual(expired[0], 400)
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                "UPDATE recovery_codes SET created_at=? WHERE set_id=?",
+                (int(time.time()), generated["setId"]),
+            )
+        bad = client.request(
+            "/api/account/recovery-codes/confirm", method="POST",
+            payload={"setId": generated["setId"], "recoveryCode": "WRONG"},
+        )
+        self.assertEqual(bad[0], 400)
+        confirmed = client.request(
+            "/api/account/recovery-codes/confirm", method="POST",
+            payload={"setId": generated["setId"], "recoveryCode": generated["codes"][0]},
+        )
+        self.assertEqual(confirmed[0], 200)
+        second_session = TestClient(self.base_url)
+        self.assertEqual(second_session.login("recoverable", "initial-password-123")[0], 200)
+        recovered = TestClient(self.base_url).request(
+            "/api/recover", method="POST",
+            payload={"username": "recoverable", "recoveryCode": generated["codes"][0], "newPassword": "recovered-password-123"},
+        )
+        self.assertEqual(recovered[0], 200)
+        self.assertEqual(client.request("/api/session")[1]["authenticated"], False)
+        self.assertEqual(second_session.request("/api/session")[1]["authenticated"], False)
+        replay = TestClient(self.base_url).request(
+            "/api/recover", method="POST",
+            payload={"username": "missing-account", "recoveryCode": generated["codes"][0], "newPassword": "another-password-123"},
+        )
+        self.assertEqual(replay[0], 200)
+        self.assertEqual(replay[1]["message"], recovered[1]["message"])
+        self.assertEqual(TestClient(self.base_url).login("recoverable", "recovered-password-123")[0], 200)
+
+    def test_22_admin_reset_contact_url_and_mcp_revocation(self):
+        """Reset credentials without secrets in events and revoke reduced MCP access immediately."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        user = TestClient(self.base_url)
+        self.assertEqual(user.register("secured", "Secured User", "secured-password-123")[0], 201)
+        admin = self.admin_client()
+        users = admin.request("/api/admin/users")[1]["users"]
+        target = next(item for item in users if item["username"] == "secured")
+        contact = "https://example.com/contact"
+        saved = admin.request(
+            "/api/admin/settings", method="PUT",
+            payload={"registrationEnabled": True, "contactPageUrl": contact},
+        )
+        self.assertEqual(saved[1]["contactPageUrl"], contact)
+        self.assertEqual(TestClient(self.base_url).request("/api/session")[1]["contactPageUrl"], contact)
+        permissions = {"enabled": True, "read": True, "write": False, "archive": False, "delete": False}
+        self.assertEqual(admin.request(
+            f"/api/admin/users/{target['id']}/mcp", method="PUT", payload=permissions
+        )[0], 200)
+        with sqlite3.connect(self.database_path) as database:
+            now = int(time.time())
+            database.execute("INSERT OR REPLACE INTO oauth_clients VALUES ('permission-client', 'Permission test', '[]', ?)", (now,))
+            grant_id = database.execute(
+                "INSERT INTO oauth_grants (user_id, client_id, scopes, created_at) VALUES (?, 'permission-client', 'aics.read', ?)",
+                (target["id"], now),
+            ).lastrowid
+            raw_token = "permission-" + secrets.token_urlsafe(40)
+            database.execute(
+                "INSERT INTO oauth_tokens (token_hash, grant_id, token_type, family_id, created_at, expires_at, scopes) VALUES (?, ?, 'access', 'permission-family', ?, ?, 'aics.read')",
+                (server.token_hash(raw_token), grant_id, now, now + 3600),
+            )
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            self.assertIsNotNone(server.resolve_access_token(raw_token, "aics.read"))
+        disabled = {"enabled": False, "read": False, "write": False, "archive": False, "delete": False}
+        self.assertEqual(admin.request(
+            f"/api/admin/users/{target['id']}/mcp", method="PUT", payload=disabled
+        )[0], 200)
+        with unittest.mock.patch.object(server, "DB_PATH", self.database_path):
+            self.assertIsNone(server.resolve_access_token(raw_token))
+        reset = admin.request(
+            f"/api/admin/users/{target['id']}/reset-password", method="POST",
+            payload={"temporaryPassword": "", "requireChange": True},
+        )
+        self.assertEqual(reset[0], 200, reset[1])
+        self.assertTrue(server.validate_password(reset[1]["temporaryPassword"]))
+        self.assertEqual(user.request("/api/session")[1]["authenticated"], False)
+        signed_in = TestClient(self.base_url).login("secured", reset[1]["temporaryPassword"])
+        self.assertTrue(signed_in[1]["user"]["mustChangePassword"])
+        with sqlite3.connect(self.database_path) as database:
+            event = database.execute(
+                "SELECT event_type FROM security_events WHERE subject_user_id=? ORDER BY id DESC LIMIT 1",
+                (target["id"],),
+            ).fetchone()[0]
+            columns = {row[1] for row in database.execute("PRAGMA table_info(security_events)")}
+        self.assertEqual(event, "admin_password_reset")
+        self.assertFalse(columns & {"password", "token", "recovery_code", "content"})
+
+    def test_23_long_prompts_private_attachments_and_cleanup(self):
+        """Bound long Markdown and keep validated prompt files isolated and recoverable."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        owner = TestClient(self.base_url)
+        other = TestClient(self.base_url)
+        self.assertEqual(owner.register("promptowner", "Prompt Owner", "prompt-owner-password")[0], 201)
+        self.assertEqual(other.register("promptother", "Prompt Other", "prompt-other-password")[0], 201)
+        body = "# Master prompt\n\n" + ("Fictional instruction.\n" * 4500)
+        workspace = {
+            "projects": [{"id": "private-project", "title": "Private", "episodes": [], "characters": [], "prompts": [{"id": "master-prompt", "name": "Master", "category": "Style", "purpose": "Long form", "body": body, "modelSettings": "", "sourceUrl": "https://example.com/source", "sourceNotes": "Public source notes", "updatedAt": "now"}], "gates": [], "bible": {}}],
+            "activeId": "private-project",
+        }
+        self.assertLess(len(body), server.MAX_PROMPT_BODY)
+        self.assertEqual(owner.request("/api/workspace", method="PUT", payload={"revision": 0, "data": workspace})[0], 200)
+        path = "/api/projects/private-project/prompts/master-prompt/attachments"
+        uploaded = owner.request(
+            path, method="PUT", raw_body=b"private markdown\n",
+            extra_headers={"Content-Type": "text/markdown", "X-File-Name": "notes.md"},
+        )
+        self.assertEqual(uploaded[0], 201, uploaded[1])
+        attachment_id = uploaded[1]["attachment"]["id"]
+        self.assertEqual(other.request(path)[0], 404)
+        self.assertEqual(owner.request(path + "/" + str(attachment_id))[1], "private markdown\n")
+        invalid = owner.request(
+            path, method="PUT", raw_body=b"not a pdf",
+            extra_headers={"Content-Type": "application/pdf", "X-File-Name": "fake.pdf"},
+        )
+        self.assertEqual(invalid[0], 400)
+        current = owner.request("/api/workspace")[1]
+        current["data"]["projects"][0]["prompts"] = []
+        self.assertEqual(owner.request(
+            "/api/workspace", method="PUT",
+            payload={"revision": current["revision"], "data": current["data"]},
+        )[0], 200)
+        self.assertEqual(owner.request(path + "/" + str(attachment_id))[0], 404)
+
+    def test_24_tool_ownership_assignment_and_cross_user_rejection(self):
+        """Keep user tools private and admin assignments read-only for recipients."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        first = TestClient(self.base_url)
+        second = TestClient(self.base_url)
+        self.assertEqual(first.register("toolone", "Tool One", "tool-one-password")[0], 201)
+        self.assertEqual(second.register("tooltwo", "Tool Two", "tool-two-password")[0], 201)
+        details = {"name": "Private Tool", "category": "Writing", "url": "https://example.com/tool", "purpose": "Private purpose", "notes": ""}
+        created = first.request("/api/tools", method="POST", payload=details)
+        self.assertEqual(created[0], 201, created[1])
+        private_id = created[1]["tool"]["id"]
+        self.assertNotIn(private_id, [item["id"] for item in second.request("/api/tools")[1]["tools"]])
+        self.assertEqual(second.request(f"/api/tools/{private_id}", method="DELETE")[0], 403)
+        admin = self.admin_client()
+        admin_tool = admin.request("/api/admin/tools", method="POST", payload=dict(details, name="Assigned Tool"))[1]["tool"]
+        second_id = next(item["id"] for item in admin.request("/api/admin/users")[1]["users"] if item["username"] == "tooltwo")
+        self.assertEqual(admin.request(
+            f"/api/admin/tools/{admin_tool['id']}", method="PUT",
+            payload={"action": "assign", "userIds": [second_id]},
+        )[0], 200)
+        visible = second.request("/api/tools")[1]["tools"]
+        assigned = next(item for item in visible if item["id"] == admin_tool["id"])
+        self.assertFalse(assigned["canManage"])
+        self.assertEqual(second.request(
+            f"/api/tools/{admin_tool['id']}", method="PUT", payload={"action": "archive"}
+        )[0], 403)
 
 if __name__ == "__main__":
     unittest.main()

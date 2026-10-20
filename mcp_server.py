@@ -33,7 +33,7 @@ DELETE = {
 }
 Identifier = Annotated[str, Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")]
 Revision = Annotated[int, Field(ge=0)]
-BoundedText = Annotated[str, Field(max_length=20_000)]
+BoundedText = Annotated[str, Field(max_length=120_000)]
 Confirmation = Annotated[str, Field(min_length=1, max_length=200)]
 
 
@@ -267,7 +267,7 @@ def archive_content_record(
 ) -> dict[str, Any]:
     """Archive one caller-owned project, episode, character, or prompt."""
     return call(
-        "aics.write", mcp_service.set_archive_state,
+        "aics.archive", mcp_service.set_archive_state,
         project_id, record_type, record_id, expected_revision, True,
     )
 
@@ -281,7 +281,7 @@ def restore_content_record(
 ) -> dict[str, Any]:
     """Restore one caller-owned project, episode, character, or prompt."""
     return call(
-        "aics.write", mcp_service.set_archive_state,
+        "aics.archive", mcp_service.set_archive_state,
         project_id, record_type, record_id, expected_revision, False,
     )
 
@@ -294,7 +294,7 @@ def delete_project(
 ) -> dict[str, Any]:
     """Permanently delete one project and its nested content after exact-title confirmation."""
     return call(
-        "aics.write", mcp_service.delete_project,
+        "aics.delete", mcp_service.delete_project,
         project_id, expected_revision, confirmation,
     )
 
@@ -308,7 +308,7 @@ def delete_episode(
 ) -> dict[str, Any]:
     """Permanently delete one episode and its shots after exact-title confirmation."""
     return call(
-        "aics.write", mcp_service.delete_episode,
+        "aics.delete", mcp_service.delete_episode,
         project_id, episode_id, expected_revision, confirmation,
     )
 
@@ -322,7 +322,7 @@ def delete_character(
 ) -> dict[str, Any]:
     """Permanently delete one character and private image after exact-name confirmation."""
     return call(
-        "aics.write", mcp_service.delete_character,
+        "aics.delete", mcp_service.delete_character,
         project_id, character_id, expected_revision, confirmation,
     )
 
@@ -336,7 +336,7 @@ def delete_project_prompt(
 ) -> dict[str, Any]:
     """Delete one prompt after exact-name confirmation while preserving shot snapshots."""
     return call(
-        "aics.write", mcp_service.delete_project_prompt,
+        "aics.delete", mcp_service.delete_project_prompt,
         project_id, prompt_id, expected_revision, confirmation,
     )
 
@@ -351,7 +351,7 @@ def delete_episode_shot(
 ) -> dict[str, Any]:
     """Permanently delete one unnamed shot after exact stable-ID confirmation."""
     return call(
-        "aics.write", mcp_service.delete_episode_shot,
+        "aics.delete", mcp_service.delete_episode_shot,
         project_id, episode_id, shot_id, expected_revision, confirmation,
     )
 
@@ -365,7 +365,7 @@ def delete_production_gate(
 ) -> dict[str, Any]:
     """Permanently delete one production gate after exact-name confirmation."""
     return call(
-        "aics.write", mcp_service.delete_production_gate,
+        "aics.delete", mcp_service.delete_production_gate,
         project_id, gate_id, expected_revision, confirmation,
     )
 
