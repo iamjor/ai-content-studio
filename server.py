@@ -43,6 +43,11 @@ OAUTH_UI_LOCALES_PATTERN = re.compile(
     r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*"
     r"(?: [A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)*"
 )
+DEFAULT_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; style-src 'self'; script-src 'self'; "
+    "img-src 'self' data:; object-src 'none'; base-uri 'none'; "
+    "form-action 'self'; frame-ancestors 'none'"
+)
 MCP_INTERNAL_PORT = int(os.environ.get("AICS_MCP_INTERNAL_PORT", "8788"))
 PUBLIC_BASE_URL = os.environ.get(
     "AICS_PUBLIC_BASE_URL", "http://127.0.0.1:8787"
@@ -213,6 +218,32 @@ def validate_redirect_uri(value):
     return parsed.scheme == "http" and parsed.hostname in {
         "localhost", "127.0.0.1", "::1"
     }
+
+
+def oauth_redirect_origin(value):
+    """Return a CSP-safe origin from an already validated OAuth redirect URI."""
+    parsed = urlsplit(value)
+    hostname = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        raise ValueError("Invalid redirect origin")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("Invalid redirect origin") from error
+    if ":" in hostname:
+        if not re.fullmatch(r"[0-9A-Fa-f:.]+", hostname):
+            raise ValueError("Invalid redirect origin")
+        authority = "[" + hostname + "]"
+    else:
+        try:
+            authority = hostname.encode("idna").decode("ascii")
+        except UnicodeError as error:
+            raise ValueError("Invalid redirect origin") from error
+        if not re.fullmatch(r"[A-Za-z0-9.-]+", authority):
+            raise ValueError("Invalid redirect origin")
+    if port is not None:
+        authority += ":" + str(port)
+    return parsed.scheme.lower() + "://" + authority
 
 
 def token_hash(token):
@@ -725,7 +756,14 @@ class Handler(BaseHTTPRequestHandler):
             f"{args[1] if len(args) > 1 else '-'}"
         )
 
-    def reply(self, status, body, content_type="application/json; charset=utf-8", extra=None):
+    def reply(
+        self,
+        status,
+        body,
+        content_type="application/json; charset=utf-8",
+        extra=None,
+        content_security_policy=DEFAULT_CONTENT_SECURITY_POLICY,
+    ):
         """Send a response with common browser security headers."""
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -738,12 +776,7 @@ class Handler(BaseHTTPRequestHandler):
             "Permissions-Policy",
             "camera=(), microphone=(), geolocation=(), payment=()",
         )
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'self'; style-src 'self'; script-src 'self'; "
-            "img-src 'self' data:; object-src 'none'; base-uri 'none'; "
-            "form-action 'self'; frame-ancestors 'none'",
-        )
+        self.send_header("Content-Security-Policy", content_security_policy)
         if COOKIE_SECURE:
             self.send_header(
                 "Strict-Transport-Security", "max-age=31536000"
@@ -798,10 +831,10 @@ class Handler(BaseHTTPRequestHandler):
         return {key: values[0] for key, values in parsed.items()}
 
     def redirect(self, location, extra=None):
-        """Send a no-store redirect to an already validated exact URL."""
+        """Redirect a completed form submission to an already validated URL."""
         headers = [("Location", location)]
         headers.extend(extra or [])
-        return self.reply(302, b"", "text/plain; charset=utf-8", headers)
+        return self.reply(303, b"", "text/plain; charset=utf-8", headers)
 
     def same_origin_request(self):
         """Reject browser state changes that explicitly originate off-site."""
@@ -1271,6 +1304,7 @@ class Handler(BaseHTTPRequestHandler):
             request_data = self.validated_authorization_request(
                 {key: values[0] for key, values in query.items()}
             )
+            callback_origin = oauth_redirect_origin(request_data["redirect_uri"])
         except ValueError:
             return self.oauth_error(
                 400, "invalid_request", "The authorization request is invalid."
@@ -1351,11 +1385,18 @@ class Handler(BaseHTTPRequestHandler):
             'name="decision" value="approve" type="submit">Authorize</button>'
             "</div></form></section></main></body></html>"
         ).encode("utf-8")
+        # Browsers apply form-action across redirects. Permit only the origin
+        # derived from the registered, validated callback for this consent page.
+        consent_csp = DEFAULT_CONTENT_SECURITY_POLICY.replace(
+            "form-action 'self'",
+            "form-action 'self' " + callback_origin,
+        )
         return self.reply(
             200,
             page,
             "text/html; charset=utf-8",
             [("Set-Cookie", self.oauth_flow_cookie(raw_flow, OAUTH_CODE_SECONDS))],
+            content_security_policy=consent_csp,
         )
 
     def oauth_authorize_submit(self):
