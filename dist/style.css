@@ -1615,3 +1615,86 @@ p {
   #securitySetup { position: absolute; inset: 0; }
   #securitySetup button, #securitySetup input, #securitySetup label { display: none; }
 }
+
+
+.app-notification {
+  position: fixed;
+  z-index: 100;
+  top: 18px;
+  left: 50%;
+  width: min(92vw, 620px);
+  transform: translateX(-50%);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  padding: 14px 18px;
+}
+
+.app-notification.error {
+  border-color: var(--danger);
+}
+
+.list-controls,
+.pager {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 0 16px;
+}
+
+.search-field {
+  display: grid;
+  min-width: min(100%, 260px);
+  flex: 1 1 320px;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.pager {
+  justify-content: center;
+  align-items: center;
+}
+
+.assignment-dialog {
+  width: min(92vw, 680px);
+}
+
+.assignment-list {
+  display: grid;
+  max-height: min(52vh, 520px);
+  overflow: auto;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.assignment-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.assignment-user span,
+.activity-status {
+  display: grid;
+  gap: 3px;
+}
+
+.assignment-user small,
+.activity-status span {
+  color: var(--muted);
+}
+
+@media (max-width: 620px) {
+  .list-controls > .btn,
+  .search-field {
+    width: 100%;
+  }
+}

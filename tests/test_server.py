@@ -1079,7 +1079,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertTrue(stored.startswith("pbkdf2_sha256$"))
         self.assertNotIn(ADMIN_PASSWORD, stored)
         self.assertEqual(legacy_count, 1)
-        self.assertEqual(schema_version, "6")
+        self.assertEqual(schema_version, "7")
 
     def test_03_registration_policy_and_roles(self):
         """Keep signup admin-controlled and never accept a requested admin role."""
@@ -1682,6 +1682,10 @@ class ServerIntegrationTests(unittest.TestCase):
         """Remove prior test accounts while retaining the initial administrator."""
         with sqlite3.connect(self.database_path) as database:
             database.execute("PRAGMA foreign_keys=ON")
+            database.execute(
+                "DELETE FROM tools WHERE owner_user_id IN (SELECT id FROM users WHERE username<>?)",
+                (ADMIN_USERNAME,),
+            )
             database.execute("DELETE FROM users WHERE username<>?", (ADMIN_USERNAME,))
 
     def test_14_user_lifecycle_and_scoped_deletion(self):
@@ -3424,6 +3428,175 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(second.request(
             f"/api/tools/{admin_tool['id']}", method="PUT", payload={"action": "archive"}
         )[0], 403)
+
+    def test_25_tool_dedup_sharing_activity_and_frontend_contract(self):
+        """Cover canonical tools, assignment isolation, activity, and UI contracts."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        owner = TestClient(self.base_url)
+        recipient = TestClient(self.base_url)
+        other = TestClient(self.base_url)
+        self.assertEqual(owner.register("audit-owner", "Audit Owner", "audit-owner-password")[0], 201)
+        self.assertEqual(recipient.register("audit-recipient", "Audit Recipient", "audit-recipient-password")[0], 201)
+        self.assertEqual(other.register("audit-other", "Audit Other", "audit-other-password")[0], 201)
+        user_tool = owner.request("/api/tools", method="POST", payload={
+            "name": "CapCut Owner", "category": "Editing",
+            "url": "https://www.owner-canonical.example/", "purpose": "Owner tool", "notes": "",
+        })
+        self.assertEqual(user_tool[0], 201, user_tool[1])
+        tool_id = user_tool[1]["tool"]["id"]
+        owner_id = owner.request("/api/session")[1]["user"]["id"]
+        conflicting = recipient.request("/api/tools", method="POST", payload={
+            "name": "Cross-user copy", "category": "Editing",
+            "url": "https://owner-canonical.example/path", "purpose": "Copy", "notes": "",
+        })
+        self.assertEqual(conflicting[0], 409, conflicting[1])
+        admin = self.admin_client()
+        duplicate = admin.request("/api/admin/tools", method="POST", payload={
+            "name": "CapCut Duplicate", "category": "Editing",
+            "url": "https://owner-canonical.example:443/editor?mode=one#top",
+            "purpose": "Duplicate", "notes": "",
+        })
+        self.assertEqual(duplicate[0], 200, duplicate[1])
+        self.assertTrue(duplicate[1]["linkedToExisting"])
+        self.assertEqual(duplicate[1]["tool"]["id"], tool_id)
+        self.assertEqual(duplicate[1]["tool"]["ownerUserId"], owner_id)
+        users = admin.request("/api/admin/users")[1]["users"]
+        recipient_id = next(item["id"] for item in users if item["username"] == "audit-recipient")
+        other_id = next(item["id"] for item in users if item["username"] == "audit-other")
+        assigned = admin.request(
+            f"/api/admin/tools/{tool_id}", method="PUT",
+            payload={"action": "assign", "userIds": [recipient_id, other_id]},
+        )
+        self.assertEqual(assigned[0], 200, assigned[1])
+        rejected_assignment = admin.request(
+            f"/api/admin/tools/{tool_id}", method="PUT",
+            payload={"action": "assign", "userIds": [owner_id]},
+        )
+        self.assertEqual(rejected_assignment[0], 400, rejected_assignment[1])
+        visible = next(item for item in recipient.request("/api/tools")[1]["tools"] if item["id"] == tool_id)
+        self.assertFalse(visible["canManage"])
+        self.assertEqual(recipient.request(f"/api/tools/{tool_id}", method="PUT", payload={"action": "archive"})[0], 403)
+        self.assertEqual(recipient.request(f"/api/tools/{tool_id}", method="DELETE")[0], 403)
+        unassigned = admin.request(
+            f"/api/admin/tools/{tool_id}", method="PUT",
+            payload={"action": "assign", "userIds": [other_id]},
+        )
+        self.assertEqual(unassigned[0], 200, unassigned[1])
+        self.assertNotIn(tool_id, [item["id"] for item in recipient.request("/api/tools")[1]["tools"]])
+        self.assertIn(tool_id, [item["id"] for item in other.request("/api/tools")[1]["tools"]])
+
+        admin_tool = admin.request("/api/admin/tools", method="POST", payload={
+            "name": "Canonical Admin", "category": "Planning",
+            "url": "https://www.unique-tool.example/start",
+            "purpose": "Admin tool", "notes": "",
+        })
+        self.assertEqual(admin_tool[0], 201, admin_tool[1])
+        linked = recipient.request("/api/tools", method="POST", payload={
+            "name": "Duplicate User Copy", "category": "Planning",
+            "url": "https://unique-tool.example/different?q=1",
+            "purpose": "Duplicate", "notes": "",
+        })
+        self.assertEqual(linked[0], 200, linked[1])
+        self.assertTrue(linked[1]["linkedToExisting"])
+        self.assertEqual(linked[1]["tool"]["id"], admin_tool[1]["tool"]["id"])
+        self.assertFalse(linked[1]["tool"]["canManage"])
+
+        fresh = TestClient(self.base_url)
+        self.assertEqual(fresh.login("audit-recipient", "audit-recipient-password")[0], 200)
+        users = admin.request("/api/admin/users")[1]["users"]
+        activity = next(item for item in users if item["id"] == recipient_id)
+        self.assertIsInstance(activity["lastLoginAt"], int)
+        self.assertIsInstance(activity["lastSeenAt"], int)
+        self.assertTrue(activity["online"])
+        bounded_seen = int(time.time()) - 30
+        with sqlite3.connect(self.database_path) as database:
+            database.execute("UPDATE users SET last_seen_at=? WHERE id=?", (bounded_seen, recipient_id))
+        self.assertEqual(fresh.request("/api/session")[0], 200)
+        self.assertEqual(recipient.request("/api/session")[0], 200)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(database.execute("SELECT last_seen_at FROM users WHERE id=?", (recipient_id,)).fetchone()[0], bounded_seen)
+            database.execute("UPDATE users SET last_seen_at=? WHERE id=?", (int(time.time()) - 301, recipient_id))
+        activity = next(item for item in admin.request("/api/admin/users")[1]["users"] if item["id"] == recipient_id)
+        self.assertFalse(activity["online"])
+        self.assertEqual(fresh.request("/api/session")[0], 200)
+        activity = next(item for item in admin.request("/api/admin/users")[1]["users"] if item["id"] == recipient_id)
+        self.assertTrue(activity["online"])
+
+        html = admin.request("/")[1]
+        script = admin.request("/app.js")[1]
+        for identifier in (
+            "appNotification", "toolAssignmentDialog", "assignmentSearch",
+            "toolSearch", "userSearch", "projectSearch", "episodeSearch",
+            "characterSearch", "promptSearch",
+        ):
+            self.assertIn(f'id="{identifier}"', html)
+        self.assertIn('"role", kind === "error" ? "alert" : "status"', script)
+        self.assertIn("button.disabled = true", script)
+        self.assertIn("Assignments saved.", script)
+        self.assertIn("MCP permissions saved.", script)
+        self.assertNotIn('window.prompt("Enter usernames to assign', script)
+        self.assertIn("function pagedItems", script)
+        self.assertIn("PAGE_SIZE = 12", script)
+        self.assertIn("Assignments were not saved", script)
+        self.assertIn("MCP permissions were not saved", script)
+        self.assertIn("No results match", script)
+        self.assertIn("toLocaleString", script)
+
+
+class FollowupMigrationTests(unittest.TestCase):
+    """Preserve v6 records while adding canonical tools and activity fields."""
+
+    def test_schema_v7_preserves_duplicate_tool_ids_and_adds_activity(self):
+        """Populate identities without merging existing duplicate records."""
+        with tempfile.TemporaryDirectory(prefix="aics-v7-") as directory:
+            database_path = Path(directory) / "v6.sqlite3"
+            now = int(time.time())
+            with sqlite3.connect(database_path) as database:
+                database.executescript("""
+                    CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO app_settings VALUES ('schema_version', '6');
+                    CREATE TABLE users (
+                        id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                        display_name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL,
+                        is_active INTEGER NOT NULL DEFAULT 1, theme TEXT NOT NULL DEFAULT 'dark',
+                        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER,
+                        must_change_password INTEGER NOT NULL DEFAULT 0,
+                        recovery_setup_required INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE tools (
+                        id INTEGER PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL,
+                        url TEXT NOT NULL, purpose TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+                        archived_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                        owner_user_id INTEGER REFERENCES users(id)
+                    );
+                """)
+                database.execute(
+                    "INSERT INTO users VALUES (1, 'owner', 'Owner', 'hash', 'admin', 1, 'dark', ?, ?, NULL, 0, 0)",
+                    (now, now),
+                )
+                database.executemany(
+                    "INSERT INTO tools VALUES (?, ?, 'Editing', ?, 'Purpose', '', NULL, ?, ?, NULL)",
+                    ((7, "First", "https://www.capcut.com/", now, now),
+                     (9, "Second", "https://capcut.com/editor", now, now)),
+                )
+            with unittest.mock.patch.multiple(
+                server, DB_PATH=database_path, ADMIN_USERNAME="owner",
+                ADMIN_PASSWORD="unused-password", ADMIN_DISPLAY_NAME="Owner",
+            ):
+                server.setup()
+            with sqlite3.connect(database_path) as database:
+                columns = {row[1] for row in database.execute("PRAGMA table_info(users)")}
+                tool_rows = database.execute(
+                    "SELECT id, canonical_domain FROM tools ORDER BY id"
+                ).fetchall()
+                schema_version = database.execute(
+                    "SELECT value FROM app_settings WHERE key='schema_version'"
+                ).fetchone()[0]
+            self.assertEqual(schema_version, "7")
+            self.assertTrue({"last_login_at", "last_seen_at"}.issubset(columns))
+            self.assertEqual(tool_rows, [(7, "capcut.com"), (9, "capcut.com")])
+
 
 if __name__ == "__main__":
     unittest.main()

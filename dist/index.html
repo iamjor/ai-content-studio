@@ -147,6 +147,7 @@
             <input class="sr" type="file" accept="application/json" id="file">
           </div>
         </header>
+        <div class="app-notification hidden" id="appNotification" role="status" aria-live="polite" aria-atomic="true"></div>
 
         <section class="section active" id="overview" aria-labelledby="overviewTitle">
           <div class="hero">
@@ -183,7 +184,8 @@
             <div><h2 id="projectsTitle">Projects</h2><p>Archive finished work or restore it later.</p></div>
             <div class="action-row"><label class="compact-field">View<select id="projectFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" data-new type="button">+ New project</button></div>
           </div>
-          <div class="grid" id="projectGrid"></div>
+          <div class="list-controls"><label class="search-field" for="projectSearch">Search projects<input id="projectSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="project">Clear search</button><span id="projectResults" role="status" aria-live="polite"></span></div>
+          <div class="grid" id="projectGrid"></div><div class="pager" id="projectPager"></div>
         </section>
 
         <section class="section" id="episodes" aria-labelledby="episodesTitle">
@@ -195,7 +197,8 @@
             <div><h2 id="episodesTitle">Episodes &amp; scripts</h2><p>Each project keeps its own timeline and production status.</p></div>
             <div class="action-row"><label class="compact-field">View<select id="episodeFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addEpisode" type="button">+ Episode</button></div>
           </div>
-          <div class="grid" id="episodeGrid"></div>
+          <div class="list-controls"><label class="search-field" for="episodeSearch">Search episodes<input id="episodeSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="episode">Clear search</button><span id="episodeResults" role="status" aria-live="polite"></span></div>
+          <div class="grid" id="episodeGrid"></div><div class="pager" id="episodePager"></div>
         </section>
 
         <section class="section" id="characters" aria-labelledby="charactersTitle">
@@ -207,7 +210,8 @@
             <div><h2 id="charactersTitle">Cast &amp; signature assets</h2></div>
             <div class="action-row"><label class="compact-field">View<select id="characterFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addCharacter" type="button">+ Character</button></div>
           </div>
-          <div class="grid" id="characterGrid"></div>
+          <div class="list-controls"><label class="search-field" for="characterSearch">Search characters<input id="characterSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="character">Clear search</button><span id="characterResults" role="status" aria-live="polite"></span></div>
+          <div class="grid" id="characterGrid"></div><div class="pager" id="characterPager"></div>
         </section>
 
         <section class="section" id="prompts" aria-labelledby="promptsTitle">
@@ -219,7 +223,8 @@
             <div><h2 id="promptsTitle">Prompt library</h2><p>Save reusable production instructions and copy them when needed.</p></div>
             <button class="btn primary" id="addPrompt" type="button">+ Prompt</button>
           </div>
-          <div class="grid" id="promptGrid"></div>
+          <div class="list-controls"><label class="search-field" for="promptSearch">Search prompts<input id="promptSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="prompt">Clear search</button><span id="promptResults" role="status" aria-live="polite"></span></div>
+          <div class="grid" id="promptGrid"></div><div class="pager" id="promptPager"></div>
         </section>
 
         <section class="section" id="workflow" aria-labelledby="workflowTitle">
@@ -244,7 +249,8 @@
 
         <section class="section" id="tools" aria-labelledby="toolsTitle">
           <div class="rowhead"><div><h2 id="toolsTitle">Production tools</h2><p>Your private tools plus admin tools assigned to you.</p></div><div class="action-row" id="toolAdminActions"><label class="compact-field" id="toolFilterWrap">View<select id="toolFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addTool" type="button">+ Add tool</button></div></div>
-          <div class="stack" id="toolGrid"></div>
+          <div class="list-controls"><label class="search-field" for="toolSearch">Search tool catalog<input id="toolSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="tool">Clear search</button><span id="toolResults" role="status" aria-live="polite"></span></div>
+          <div class="stack" id="toolGrid"></div><div class="pager" id="toolPager"></div>
           <div class="rowhead"><div><h2>Cost and rights</h2></div></div>
           <div class="notice">Cloud video credits and free exports can change. Keep clean masters and approved character references. Use music with rights for every platform where you publish.</div>
         </section>
@@ -315,7 +321,8 @@
             <p class="form-status" id="adminSettingsStatus" role="status"></p>
           </form>
           <div class="rowhead"><div><h2>Users</h2><p>Disable or archive without losing data. Permanent deletion removes only the selected account workspace and uploads.</p></div><label class="compact-field">View<select id="userFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
-          <div class="user-list" id="userList"></div>
+          <div class="list-controls"><label class="search-field" for="userSearch">Search users<input id="userSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="user">Clear search</button><span id="userResults" role="status" aria-live="polite"></span></div>
+          <div class="user-list" id="userList"></div><div class="pager" id="userPager"></div>
         </section>
       </main>
     </div>
@@ -339,6 +346,18 @@
       <label class="field">Optional notes<textarea id="toolNotes" class="textarea-short" maxlength="500"></textarea></label>
       <p class="form-status" id="toolStatus" role="status" aria-live="polite"></p>
       <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Save tool</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal assignment-dialog" id="toolAssignmentDialog" aria-labelledby="assignmentTitle">
+    <form id="toolAssignmentForm">
+      <div class="eyebrow">Tool access</div><h2 id="assignmentTitle">Assign users</h2>
+      <p>Recipients receive View and Use only. The original owner keeps management access.</p>
+      <label class="field" for="assignmentSearch">Search eligible users<input id="assignmentSearch" type="search" autocomplete="off"></label>
+      <p id="assignmentResultCount" role="status" aria-live="polite"></p>
+      <div class="assignment-list" id="assignmentList"></div><div class="pager" id="assignmentPager"></div>
+      <p class="form-status" id="assignmentStatus" role="status" aria-live="polite"></p>
+      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" id="assignmentSave" type="submit">Save assignments</button></div>
     </form>
   </dialog>
 

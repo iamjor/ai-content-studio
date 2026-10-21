@@ -100,6 +100,8 @@ SESSION_SECONDS = int(
         str(int(os.environ.get("AICS_SESSION_HOURS", "12")) * 60 * 60),
     )
 )
+LAST_SEEN_WRITE_SECONDS = 60
+ONLINE_WINDOW_SECONDS = 5 * 60
 COOKIE_SECURE = os.environ.get("AICS_COOKIE_SECURE", "1").strip().lower() not in {
     "0",
     "false",
@@ -417,6 +419,24 @@ def validate_https_url(value):
         return False
     parsed = urlsplit(value.strip())
     return parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username
+
+
+def canonical_tool_domain(value):
+    """Return a stable HTTPS host identity for duplicate tool prevention."""
+    if not validate_https_url(value):
+        raise ValueError("Invalid tool URL")
+    parsed = urlsplit(value.strip())
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    try:
+        hostname = hostname.encode("idna").decode("ascii")
+        port = parsed.port
+    except (UnicodeError, ValueError) as error:
+        raise ValueError("Invalid tool URL") from error
+    if not hostname:
+        raise ValueError("Invalid tool URL")
+    return hostname if port in {None, 443} else f"{hostname}:{port}"
 
 
 def validate_public_base_url(value):
@@ -907,6 +927,10 @@ def setup():
             database.execute(
                 "ALTER TABLE users ADD COLUMN recovery_setup_required INTEGER NOT NULL DEFAULT 1"
             )
+        if "last_login_at" not in user_columns:
+            database.execute("ALTER TABLE users ADD COLUMN last_login_at INTEGER")
+        if "last_seen_at" not in user_columns:
+            database.execute("ALTER TABLE users ADD COLUMN last_seen_at INTEGER")
         tool_columns = {
             row["name"] for row in database.execute("PRAGMA table_info(tools)")
         }
@@ -914,6 +938,8 @@ def setup():
             database.execute(
                 "ALTER TABLE tools ADD COLUMN owner_user_id INTEGER REFERENCES users(id)"
             )
+        if "canonical_domain" not in tool_columns:
+            database.execute("ALTER TABLE tools ADD COLUMN canonical_domain TEXT")
         token_columns = {
             row["name"] for row in database.execute("PRAGMA table_info(oauth_tokens)")
         }
@@ -959,13 +985,28 @@ def setup():
                 """,
                 ((*tool, now, now) for tool in TOOL_SEEDS),
             )
+        if previous_schema < 7:
+            for tool in database.execute(
+                "SELECT id, url FROM tools WHERE canonical_domain IS NULL"
+            ).fetchall():
+                try:
+                    identity = canonical_tool_domain(tool["url"])
+                except ValueError:
+                    identity = None
+                database.execute(
+                    "UPDATE tools SET canonical_domain=? WHERE id=?",
+                    (identity, tool["id"]),
+                )
+        database.execute(
+            "CREATE INDEX IF NOT EXISTS tools_canonical_domain ON tools(canonical_domain)"
+        )
         if get_setting(database, "registration_enabled") is None:
             set_setting(
                 database,
                 "registration_enabled",
                 "1" if REGISTRATION_DEFAULT else "0",
             )
-        set_setting(database, "schema_version", "6")
+        set_setting(database, "schema_version", "7")
 
         admin = database.execute(
             "SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1"
@@ -1288,7 +1329,7 @@ class Handler(BaseHTTPRequestHandler):
                     s.token_hash, s.csrf_token, s.expires_at,
                     u.id, u.username, u.display_name, u.role, u.is_active,
                     u.archived_at, u.theme, u.must_change_password,
-                    u.recovery_setup_required
+                    u.recovery_setup_required, u.last_login_at, u.last_seen_at
                 FROM sessions s
                 JOIN users u ON u.id=s.user_id
                 WHERE s.token_hash=?
@@ -1307,6 +1348,13 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 self._session_cache = None
                 return None
+            database.execute(
+                """
+                UPDATE users SET last_seen_at=?
+                WHERE id=? AND (last_seen_at IS NULL OR last_seen_at<=?)
+                """,
+                (now, row["id"], now - LAST_SEEN_WRITE_SECONDS),
+            )
         self._session_cache = row
         return row
 
@@ -1950,6 +1998,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.oauth_error(401, "access_denied", "Sign-in failed.")
             with connect() as database:
                 self.release_login_attempt(database, attempt_scope)
+                database.execute(
+                    "UPDATE users SET last_login_at=? WHERE id=?",
+                    (now, user["id"]),
+                )
             user_id = user["id"]
         with connect() as database:
             account = database.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
@@ -2596,6 +2648,10 @@ class Handler(BaseHTTPRequestHandler):
 
         with connect() as database:
             self.release_attempts(database, scoped_limits)
+            database.execute(
+                "UPDATE users SET last_login_at=?, last_seen_at=? WHERE id=?",
+                (now, now, user["id"]),
+            )
             database.execute(
                 "DELETE FROM sessions WHERE expires_at<=?", (now,)
             )
@@ -3371,6 +3427,12 @@ class Handler(BaseHTTPRequestHandler):
         for row in rows:
             item = public_user(row)
             item["createdAt"] = row["created_at"]
+            item["lastLoginAt"] = row["last_login_at"]
+            item["lastSeenAt"] = row["last_seen_at"]
+            item["online"] = bool(
+                row["last_seen_at"] is not None
+                and row["last_seen_at"] >= int(time.time()) - ONLINE_WINDOW_SECONDS
+            )
             with connect() as permission_database:
                 item["mcpPermissions"] = mcp_permissions(permission_database, row["id"], row["role"])
             users.append(item)
@@ -3627,12 +3689,10 @@ class Handler(BaseHTTPRequestHandler):
                     ) AS assigned
                     FROM tools
                     WHERE tools.archived_at IS NULL AND (
-                        tools.owner_user_id=? OR (
-                            tools.owner_user_id IS NULL AND EXISTS(
+                        tools.owner_user_id=? OR EXISTS(
                                 SELECT 1 FROM tool_assignments a
                                 WHERE a.tool_id=tools.id AND a.user_id=?
                             )
-                        )
                     )
                     ORDER BY category, name, id
                     """, (session["id"], session["id"], session["id"]),
@@ -3640,23 +3700,79 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(200, {"tools": [self.serialize_tool(row, session) for row in rows]})
 
     def create_tool(self, session):
-        """Create an admin catalog tool or a private user-owned tool."""
+        """Create a tool or safely reuse one active canonical domain."""
         try:
             value = self.tool_payload()
+            identity = canonical_tool_domain(value["url"])
         except ValueError:
-            return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
+            return self.json_reply(
+                400, {"error": "Enter valid tool details and an HTTPS URL."}
+            )
         now = int(time.time())
         owner_id = None if session["role"] == "admin" else session["id"]
         with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            existing = database.execute(
+                """
+                SELECT tools.*, EXISTS(
+                    SELECT 1 FROM tool_assignments a
+                    WHERE a.tool_id=tools.id AND a.user_id=?
+                ) AS assigned
+                FROM tools
+                WHERE canonical_domain=? AND archived_at IS NULL
+                ORDER BY id LIMIT 1
+                """,
+                (session["id"], identity),
+            ).fetchone()
+            if existing:
+                if session["role"] != "admin":
+                    if existing["owner_user_id"] is None:
+                        database.execute(
+                            """
+                            INSERT OR IGNORE INTO tool_assignments
+                                (tool_id, user_id, created_at)
+                            VALUES (?, ?, ?)
+                            """,
+                            (existing["id"], session["id"], now),
+                        )
+                        existing = database.execute(
+                            "SELECT tools.*, 1 AS assigned FROM tools WHERE id=?",
+                            (existing["id"],),
+                        ).fetchone()
+                    else:
+                        return self.json_reply(
+                            409,
+                            {"error": "That tool domain already exists. Ask an administrator to share it."},
+                        )
+                return self.json_reply(
+                    200,
+                    {
+                        "tool": self.serialize_tool(existing, session),
+                        "linkedToExisting": True,
+                        "message": (
+                            "The existing admin tool was assigned to your account."
+                            if session["role"] != "admin"
+                            else "The existing canonical tool was retained."
+                        ),
+                    },
+                )
             cursor = database.execute(
                 """
                 INSERT INTO tools
-                    (name, category, url, purpose, notes, owner_user_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (*value.values(), owner_id, now, now),
+                    (name, category, url, purpose, notes, owner_user_id,
+                     canonical_domain, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*value.values(), owner_id, identity, now, now),
             )
-            row = database.execute("SELECT tools.*, 0 AS assigned FROM tools WHERE id=?", (cursor.lastrowid,)).fetchone()
-        return self.json_reply(201, {"tool": self.serialize_tool(row, session)})
+            row = database.execute(
+                "SELECT tools.*, 0 AS assigned FROM tools WHERE id=?",
+                (cursor.lastrowid,),
+            ).fetchone()
+        return self.json_reply(
+            201,
+            {"tool": self.serialize_tool(row, session), "linkedToExisting": False},
+        )
 
     def update_tool(self, path, session):
         """Edit a manageable tool or apply admin-only lifecycle and assignments."""
@@ -3678,14 +3794,14 @@ class Handler(BaseHTTPRequestHandler):
             now = int(time.time())
             if action in {"archive", "restore"}:
                 database.execute("UPDATE tools SET archived_at=?, updated_at=? WHERE id=?", (now if action == "archive" else None, now, tool_id))
-            elif action == "assign" and admin and row["owner_user_id"] is None:
+            elif action == "assign" and admin:
                 user_ids = value.get("userIds")
                 if not isinstance(user_ids, list) or len(user_ids) > MAX_USERS or any(type(item) is not int for item in user_ids):
                     return self.json_reply(400, {"error": "Choose valid users."})
                 valid = {item["id"] for item in database.execute(
                     "SELECT id FROM users WHERE role='user' AND is_active=1 AND archived_at IS NULL"
                 ).fetchall()}
-                if set(user_ids) - valid:
+                if row["owner_user_id"] in set(user_ids) or set(user_ids) - valid:
                     return self.json_reply(400, {"error": "Choose valid users."})
                 database.execute("DELETE FROM tool_assignments WHERE tool_id=?", (tool_id,))
                 database.executemany(
@@ -3695,11 +3811,18 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "edit":
                 try:
                     fields = self.tool_payload_from_value(value)
+                    identity = canonical_tool_domain(fields["url"])
                 except ValueError:
                     return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
+                duplicate = database.execute(
+                    "SELECT id FROM tools WHERE canonical_domain=? AND archived_at IS NULL AND id<>? ORDER BY id LIMIT 1",
+                    (identity, tool_id),
+                ).fetchone()
+                if duplicate:
+                    return self.json_reply(409, {"error": "That tool domain already exists."})
                 database.execute(
-                    "UPDATE tools SET name=?, category=?, url=?, purpose=?, notes=?, updated_at=? WHERE id=?",
-                    (*fields.values(), now, tool_id),
+                    "UPDATE tools SET name=?, category=?, url=?, purpose=?, notes=?, canonical_domain=?, updated_at=? WHERE id=?",
+                    (*fields.values(), identity, now, tool_id),
                 )
             else:
                 return self.json_reply(400, {"error": "Choose a valid tool action."})
