@@ -1010,12 +1010,12 @@ p {
 }
 
 .user-meta strong,
-.user-meta span {
+.user-meta > span {
   display: block;
   overflow-wrap: anywhere;
 }
 
-.user-meta span {
+.user-meta > span {
   margin-top: 3px;
   color: var(--muted);
   font-size: 0.78rem;
