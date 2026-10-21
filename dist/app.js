@@ -13,6 +13,15 @@
   var editingShots = [];
   var expiryTimer = null;
   var toolRecords = [];
+  var registrationEnabled = false;
+  var authViewState = "login";
+  var PAGE_SIZE = 12;
+  var listPages = {project: 0, episode: 0, character: 0, prompt: 0, tool: 0, user: 0};
+  var assignmentTool = null;
+  var assignmentUsers = [];
+  var assignmentSelection = new Set();
+  var assignmentPage = 0;
+  var notificationTimer = null;
   var statuses = [
     "Script draft", "60s script ready", "References approved",
     "Assets generated", "Editing", "Ready for review", "Approved", "Published"
@@ -36,7 +45,6 @@
       return "";
     }
   }
-
 
   /** Render a conservative Markdown subset after escaping all raw HTML. */
   function renderMarkdown(value) {
@@ -65,13 +73,35 @@
     byId("confirmRecoveryCode").focus();
   }
 
+
+  /** Render exactly one authentication state and its valid helper controls. */
+  function renderAuthView(view, focusTarget) {
+    var views = ["login", "register", "recovery", "security"];
+    var elements = {login: "loginForm", register: "registerForm", recovery: "recoveryForm", security: "securitySetup"};
+    authViewState = views.includes(view) ? view : "login";
+    views.forEach(function (name) {
+      byId(elements[name]).classList.toggle("hidden", name !== authViewState);
+    });
+    byId("authHelpers").classList.toggle("hidden", authViewState !== "login");
+    byId("showRegister").classList.toggle("hidden", !registrationEnabled);
+    if (authViewState !== "register") {
+      setStatus(byId("registerStatus"), "", "");
+    }
+    if (authViewState !== "recovery") {
+      byId("recoverySignIn").classList.add("hidden");
+      setStatus(byId("recoveryStatus"), "", "");
+    }
+    if (focusTarget) {
+      window.requestAnimationFrame(function () { byId(focusTarget).focus(); });
+    }
+  }
+
   function showSecuritySetup(payload, regeneration) {
     session = payload;
     dismissBootstrap();
     byId("appView").classList.add("hidden");
     byId("authView").classList.remove("hidden");
-    ["loginForm", "registerForm", "registrationPrompt", "showRecovery", "recoveryForm"].forEach(function (id) { byId(id).classList.add("hidden"); });
-    byId("securitySetup").classList.remove("hidden");
+    renderAuthView("security", session.user.mustChangePassword ? "forcedCurrentPassword" : "generateRecoveryCodes");
     byId("forcedPasswordForm").classList.toggle("hidden", !session.user.mustChangePassword);
     byId("recoverySetupFlow").classList.toggle("hidden", session.user.mustChangePassword);
     byId("setupPasswordWrap").classList.toggle("hidden", !regeneration);
@@ -92,7 +122,7 @@
       var path = "/api/projects/" + encodeURIComponent(project.id) + "/prompts/" + encodeURIComponent(prompt.id) + "/attachments";
       var attachments = (await api(path)).attachments;
       byId("promptAttachmentList").innerHTML = attachments.length ? attachments.map(function (item) {
-        return '<article class="gate-row" data-attachment-id="' + item.id + '"><div><strong>' + escapeHtml(item.filename) + '</strong><p class="muted">' + escapeHtml(item.mimeType) + " · " + Math.ceil(item.byteSize / 1024) + ' KB</p></div><a class="btn" href="' + path + "/" + item.id + '" target="_blank" rel="noopener">Download</a><button class="btn danger" data-delete-attachment type="button">Delete</button></article>';
+        return '<article class="prompt-attachment" data-attachment-id="' + item.id + '"><div class="prompt-attachment-meta"><strong>' + escapeHtml(item.filename) + '</strong><p class="muted">' + escapeHtml(item.mimeType) + " · " + Math.ceil(item.byteSize / 1024) + ' KB</p></div><div class="prompt-attachment-actions"><a class="btn" href="' + path + "/" + item.id + '" target="_blank" rel="noopener">Download</a><button class="btn danger" data-delete-attachment type="button">Delete attachment</button></div></article>';
       }).join("") : '<div class="card empty"><p>No private attachments.</p></div>';
     } catch (error) { byId("promptAttachmentList").innerHTML = '<div class="notice">' + escapeHtml(error.message) + "</div>"; }
   }
@@ -100,6 +130,36 @@
     element.textContent = message || "";
     element.classList.toggle("error", kind === "error");
     element.classList.toggle("success", kind === "success");
+  }
+
+  /** Announce an operation result without blocking keyboard or screen-reader users. */
+  function notify(message, kind) {
+    var element = byId("appNotification");
+    window.clearTimeout(notificationTimer);
+    element.textContent = message;
+    element.setAttribute("role", kind === "error" ? "alert" : "status");
+    element.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+    element.classList.toggle("error", kind === "error");
+    element.classList.remove("hidden");
+    notificationTimer = window.setTimeout(function () { element.classList.add("hidden"); }, 5000);
+  }
+
+  /** Filter a permission-scoped in-memory list and return one bounded page. */
+  function pagedItems(items, kind, query, searchable) {
+    var normalized = String(query || "").trim().toLocaleLowerCase();
+    var filtered = items.filter(function (item) {
+      return !normalized || searchable(item).toLocaleLowerCase().includes(normalized);
+    });
+    var pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    listPages[kind] = Math.min(listPages[kind] || 0, pages - 1);
+    var start = listPages[kind] * PAGE_SIZE;
+    byId(kind + "Results").textContent = filtered.length + " result" + (filtered.length === 1 ? "" : "s");
+    byId(kind + "Pager").innerHTML = filtered.length > PAGE_SIZE ? '<button class="btn" type="button" data-list-page="' + kind + '" data-page-direction="-1"' + (listPages[kind] === 0 ? " disabled" : "") + '>Previous</button><span>Page ' + (listPages[kind] + 1) + " of " + pages + '</span><button class="btn" type="button" data-list-page="' + kind + '" data-page-direction="1"' + (listPages[kind] === pages - 1 ? " disabled" : "") + ">Next</button>" : "";
+    return {items: filtered.slice(start, start + PAGE_SIZE), total: filtered.length, query: normalized};
+  }
+
+  function noResults(label) {
+    return '<div class="card empty"><h3>No results match your search.</h3><p>Clear the search or try a different ' + label + ".</p></div>";
   }
 
   async function api(path, options) {
@@ -241,13 +301,7 @@
     byId("authView").classList.remove("hidden");
     byId("loginPassword").value = "";
     setStatus(byId("loginStatus"), message || "", message ? "error" : "");
-    byId("registrationPrompt").classList.toggle("hidden", !byId("registrationPrompt").dataset.enabled);
-    byId("showRecovery").classList.remove("hidden");
-    byId("securitySetup").classList.add("hidden");
-    byId("recoveryForm").classList.add("hidden");
-    byId("registerForm").classList.add("hidden");
-    byId("loginForm").classList.remove("hidden");
-    byId("loginUsername").focus();
+    renderAuthView("login", "loginUsername");
   }
 
   function populateAccount() {
@@ -464,6 +518,11 @@
 
     function projectCards(filter, home) {
       var entries = selectedItems(state.projects, home ? "active" : filter);
+      if (!home) {
+        var page = pagedItems(entries, "project", byId("projectSearch").value, function (item) { return [item.title, item.genre, item.description, item.stage].join(" "); });
+        entries = page.items;
+        if (!page.total && page.query) { return noResults("project term"); }
+      }
       if (!entries.length) { return '<div class="card empty"><h3>' + (state.projects.length ? "Nothing in this view" : "Your workspace is empty") + '</h3><p>Create a project to start planning a story.</p><button class="btn primary" data-new type="button">+ New project</button></div>'; }
       return entries.map(function (item) {
         var index = state.projects.indexOf(item);
@@ -484,6 +543,9 @@
     byId("promptProjectTitle").textContent = hasProject ? project.title : "No project selected";
     byId("workflowProjectTitle").textContent = hasProject ? project.title : "No project selected";
     if (!project) {
+      pagedItems([], "episode", byId("episodeSearch").value, function () { return ""; });
+      pagedItems([], "character", byId("characterSearch").value, function () { return ""; });
+      pagedItems([], "prompt", byId("promptSearch").value, function () { return ""; });
       byId("episodeGrid").innerHTML = '<div class="card empty"><h3>No project yet</h3><p>Create a project before adding episodes.</p></div>';
       byId("characterGrid").innerHTML = '<div class="card empty"><h3>No project yet</h3><p>Create a project before adding characters.</p></div>';
       byId("promptGrid").innerHTML = '<div class="card empty"><h3>No project yet</h3><p>Create a project before saving prompts.</p></div>';
@@ -493,23 +555,29 @@
     }
 
     var episodes = selectedItems(project.episodes, byId("episodeFilter").value);
+    var episodePage = pagedItems(episodes, "episode", byId("episodeSearch").value, function (item) { return [item.id, item.title, item.hook, item.synopsis, item.status].join(" "); });
+    episodes = episodePage.items;
     byId("episodeGrid").innerHTML = episodes.length ? episodes.map(function (episode) {
       var index = project.episodes.indexOf(episode);
       var meter = Math.max(9, (statuses.indexOf(episode.status) + 1) * 12);
       return '<article class="card"><div class="kicker">' + escapeHtml(episode.id) + ' · ' + escapeHtml(episode.duration || 60) + ' seconds</div><h3>' + escapeHtml(episode.title) + '</h3><p>' + escapeHtml(episode.hook) + '</p><progress class="meter" max="100" value="' + meter + '">' + meter + '%</progress><span class="badge ' + (episode.archived ? "" : "amber") + '">' + (episode.archived ? "Archived" : escapeHtml(episode.status || "Script draft")) + '</span>' + actions("episode", index, episode.archived) + '</article>';
-    }).join("") : '<div class="card empty"><h3>No episodes in this view</h3><p>Add an episode or change the filter.</p></div>';
+    }).join("") : (episodePage.query ? noResults("episode term") : '<div class="card empty"><h3>No episodes in this view</h3><p>Add an episode or change the filter.</p></div>');
 
     var characters = selectedItems(project.characters, byId("characterFilter").value);
+    var characterPage = pagedItems(characters, "character", byId("characterSearch").value, function (item) { return [item.name, item.role, item.age, item.look, item.state].join(" "); });
+    characters = characterPage.items;
     byId("characterGrid").innerHTML = characters.length ? characters.map(function (character) {
       var index = project.characters.indexOf(character);
       var reference = safeLink(character.link);
       var image = character.hasImage ? '<img class="character-thumb" src="/api/characters/' + encodeURIComponent(character.id) + '/image" alt="Reference for ' + escapeHtml(character.name) + '">' : "";
       return '<article class="card">' + image + '<div class="kicker">' + escapeHtml(character.role || "Character") + ' · ' + escapeHtml(character.age || "") + '</div><h3>' + escapeHtml(character.name) + '</h3><p>' + escapeHtml(character.look) + '</p><span class="badge ' + (character.archived ? "" : "amber") + '">' + (character.archived ? "Archived" : escapeHtml(character.state || "Written canon only")) + '</span>' + (reference ? '<p><a href="' + escapeHtml(reference) + '" target="_blank" rel="noopener noreferrer">Reference link</a></p>' : "") + actions("character", index, character.archived) + '</article>';
-    }).join("") : '<div class="card empty"><h3>No characters in this view</h3><p>Add a character or change the filter.</p></div>';
+    }).join("") : (characterPage.query ? noResults("character term") : '<div class="card empty"><h3>No characters in this view</h3><p>Add a character or change the filter.</p></div>');
 
-    byId("promptGrid").innerHTML = project.prompts.length ? project.prompts.map(function (prompt, index) {
+    var promptPage = pagedItems(project.prompts, "prompt", byId("promptSearch").value, function (item) { return [item.name, item.category, item.purpose, item.body, item.modelSettings].join(" "); });
+    byId("promptGrid").innerHTML = promptPage.items.length ? promptPage.items.map(function (prompt) {
+      var index = project.prompts.indexOf(prompt);
       return '<article class="card prompt-card"><div class="kicker">' + escapeHtml(prompt.category || "Other") + '</div><h3>' + escapeHtml(prompt.name) + '</h3><p>' + escapeHtml(prompt.purpose || "Reusable project prompt") + '</p><pre>' + escapeHtml(prompt.body) + '</pre><p class="muted">Updated ' + escapeHtml(prompt.updatedAt || "Not recorded") + '</p><div class="card-actions"><button class="btn" type="button" data-prompt-action="copy" data-index="' + index + '">Copy</button><button class="btn" type="button" data-prompt-action="edit" data-index="' + index + '">Edit</button></div></article>';
-    }).join("") : '<div class="card empty"><h3>No saved prompts</h3><p>Add a reusable style, subject, location, image, video, or negative prompt.</p></div>';
+    }).join("") : (promptPage.query ? noResults("prompt term") : '<div class="card empty"><h3>No saved prompts</h3><p>Add a reusable style, subject, location, image, video, or negative prompt.</p></div>');
 
     var shots = project.episodes.reduce(function (all, episode) { return all.concat(episode.shots || []); }, []);
     var approvedShots = shots.filter(function (shot) { return shot.status === "Approved"; }).length;
@@ -565,11 +633,14 @@
   function renderUsers(users) {
     var filter = byId("userFilter").value;
     users = users.filter(function (user) { return filter === "all" || (filter === "archived" ? user.archived : !user.archived); });
+    var page = pagedItems(users, "user", byId("userSearch").value, function (user) { return [user.displayName, user.username, user.role, user.active ? "active" : "disabled", user.online ? "online" : "offline", user.archived ? "archived" : ""].join(" "); });
+    users = page.items;
     byId("userList").innerHTML = users.length ? users.map(function (user) {
       var permissions = user.mcpPermissions;
       var mcp = user.role === "admin" ? '<p class="muted">Administrators retain full MCP access.</p>' : '<fieldset class="permission-grid"><legend>MCP permissions</legend>' + ["enabled", "read", "write", "archive", "delete"].map(function (key) { return '<label><input type="checkbox" data-mcp="' + key + '"' + (permissions[key] ? " checked" : "") + '> ' + escapeHtml(key === "enabled" ? "Enabled" : key) + "</label>"; }).join("") + '<button class="btn" data-user-action="mcp" type="button">Save MCP permissions</button></fieldset>';
-      return '<article class="user-row" data-user-row="' + user.id + '"><div class="user-meta"><strong>' + escapeHtml(user.displayName) + '</strong><span>@' + escapeHtml(user.username) + " · " + (user.archived ? "Archived" : user.active ? "Active" : "Disabled") + '</span></div><label class="field">Role<select data-user-role><option value="user"' + (user.role === "user" ? " selected" : "") + '>User</option><option value="admin"' + (user.role === "admin" ? " selected" : "") + '>Admin</option></select></label>' + mcp + '<div class="card-actions"><button class="btn" data-user-action="role" type="button">Save role</button><button class="btn" data-user-action="reset" type="button">Reset password</button>' + (user.archived ? '<button class="btn" data-user-action="restore" type="button">Restore</button>' : (user.active ? '<button class="btn" data-user-action="disable" type="button">Disable</button><button class="btn" data-user-action="archive" type="button">Archive</button>' : '<button class="btn" data-user-action="restore" type="button">Restore</button><button class="btn" data-user-action="archive" type="button">Archive</button>')) + '<button class="btn danger" data-user-action="delete" type="button">Delete</button></div></article>';
-    }).join("") : '<div class="card empty"><h3>No users in this view</h3></div>';
+      var activity = '<p class="activity-status"><strong>' + (user.online ? "Online" : "Offline") + '</strong><span>Last login: ' + (user.lastLoginAt ? new Date(user.lastLoginAt * 1000).toLocaleString() : "Never") + "</span></p>";
+      return '<article class="user-row" data-user-row="' + user.id + '"><div class="user-meta"><strong>' + escapeHtml(user.displayName) + '</strong><span>@' + escapeHtml(user.username) + " · " + (user.archived ? "Archived" : user.active ? "Active" : "Disabled") + '</span>' + activity + '</div><label class="field">Role<select data-user-role><option value="user"' + (user.role === "user" ? " selected" : "") + '>User</option><option value="admin"' + (user.role === "admin" ? " selected" : "") + '>Admin</option></select></label>' + mcp + '<div class="card-actions"><button class="btn" data-user-action="role" type="button">Save role</button><button class="btn" data-user-action="reset" type="button">Reset password</button>' + (user.archived ? '<button class="btn" data-user-action="restore" type="button">Restore</button>' : (user.active ? '<button class="btn" data-user-action="disable" type="button">Disable</button><button class="btn" data-user-action="archive" type="button">Archive</button>' : '<button class="btn" data-user-action="restore" type="button">Restore</button><button class="btn" data-user-action="archive" type="button">Archive</button>')) + '<button class="btn danger" data-user-action="delete" type="button">Delete</button></div></article>';
+    }).join("") : (page.query ? noResults("user term") : '<div class="card empty"><h3>No users in this view</h3></div>');
   }
   async function loadAdmin() {
     if (!session || session.user.role !== "admin") { return; }
@@ -585,11 +656,13 @@
   function renderTools() {
     var filter = session && session.user.role === "admin" ? byId("toolFilter").value : "active";
     var tools = selectedItems(toolRecords, filter);
+    var page = pagedItems(tools, "tool", byId("toolSearch").value, function (tool) { return [tool.name, tool.category, tool.purpose, tool.notes, tool.url].join(" "); });
+    tools = page.items;
     byId("toolGrid").innerHTML = tools.length ? tools.map(function (tool) {
       var label = tool.adminCreated ? (tool.assigned ? "Assigned by administrator" : "Admin tool") : (tool.ownerUserId === session.user.id ? "Your tool" : "User tool");
-      var controls = tool.canManage ? '<div class="card-actions"><button class="btn" data-tool-action="edit" type="button">Edit</button><button class="btn" data-tool-action="' + (tool.archived ? "restore" : "archive") + '" type="button">' + (tool.archived ? "Restore" : "Archive") + '</button>' + (session.user.role === "admin" && tool.adminCreated ? '<button class="btn" data-tool-action="assign" type="button">Assign users</button>' : "") + '<button class="btn danger" data-tool-action="delete" type="button">Delete</button></div>' : '<p class="muted">View and use only</p>';
+      var controls = tool.canManage ? '<div class="card-actions"><button class="btn" data-tool-action="edit" type="button">Edit</button><button class="btn" data-tool-action="' + (tool.archived ? "restore" : "archive") + '" type="button">' + (tool.archived ? "Restore" : "Archive") + '</button>' + (session.user.role === "admin" ? '<button class="btn" data-tool-action="assign" type="button">Manage assignments</button>' : "") + '<button class="btn danger" data-tool-action="delete" type="button">Delete</button></div>' : '<p class="muted">View and use only</p>';
       return '<article class="card catalog-card" data-tool-id="' + tool.id + '"><div><div class="kicker">' + escapeHtml(tool.category) + (tool.archived ? " · Archived" : "") + '</div><h3>' + escapeHtml(tool.name) + '</h3><p>' + escapeHtml(tool.purpose) + '</p>' + (tool.notes ? '<p class="muted">' + escapeHtml(tool.notes) + "</p>" : "") + '<p class="muted">' + escapeHtml(label) + '</p><a href="' + escapeHtml(safeLink(tool.url)) + '" target="_blank" rel="noopener noreferrer">Open official site</a></div>' + controls + "</article>";
-    }).join("") : '<div class="card empty"><h3>No tools in this view</h3><p>Create a private tool or ask an administrator to assign one.</p></div>';
+    }).join("") : (page.query ? noResults("tool term") : '<div class="card empty"><h3>No tools in this view</h3><p>Create a private tool or ask an administrator to assign one.</p></div>');
   }
   async function loadTools() {
     if (!session) { return; }
@@ -621,13 +694,47 @@
     byId("toolName").focus();
   }
 
+  /** Render eligible users and current selections for one tool assignment. */
+  function renderAssignmentUsers() {
+    var query = byId("assignmentSearch").value.trim().toLocaleLowerCase();
+    var users = assignmentUsers.filter(function (user) {
+      return !query || [user.displayName, user.username].join(" ").toLocaleLowerCase().includes(query);
+    });
+    var pages = Math.max(1, Math.ceil(users.length / PAGE_SIZE));
+    assignmentPage = Math.min(assignmentPage, pages - 1);
+    var visible = users.slice(assignmentPage * PAGE_SIZE, (assignmentPage + 1) * PAGE_SIZE);
+    byId("assignmentResultCount").textContent = users.length + " eligible user" + (users.length === 1 ? "" : "s") + ", " + assignmentSelection.size + " assigned";
+    byId("assignmentList").innerHTML = visible.length ? visible.map(function (user) {
+      return '<label class="assignment-user"><input type="checkbox" data-assignment-user="' + user.id + '"' + (assignmentSelection.has(user.id) ? " checked" : "") + '><span><strong>' + escapeHtml(user.displayName) + "</strong><small>@" + escapeHtml(user.username) + "</small></span></label>";
+    }).join("") : noResults("username or display name");
+    byId("assignmentPager").innerHTML = users.length > PAGE_SIZE ? '<button class="btn" type="button" data-assignment-page="-1"' + (assignmentPage === 0 ? " disabled" : "") + '>Previous</button><span>Page ' + (assignmentPage + 1) + " of " + pages + '</span><button class="btn" type="button" data-assignment-page="1"' + (assignmentPage === pages - 1 ? " disabled" : "") + ">Next</button>" : "";
+  }
+
+  /** Load active regular users before opening the responsive assignment dialog. */
+  async function openAssignmentDialog(tool) {
+    assignmentTool = tool;
+    assignmentSelection = new Set(tool.assignedUserIds || []);
+    assignmentPage = 0;
+    byId("assignmentSearch").value = "";
+    setStatus(byId("assignmentStatus"), "", "");
+    try {
+      var users = (await api("/api/admin/users")).users;
+      assignmentUsers = users.filter(function (user) { return user.role === "user" && user.active && !user.archived && user.id !== tool.ownerUserId; });
+      renderAssignmentUsers();
+      byId("toolAssignmentDialog").showModal();
+      byId("assignmentSearch").focus();
+    } catch (error) {
+      notify("Assignments could not be loaded: " + error.message, "error");
+    }
+  }
+
   async function bootstrap() {
     byId("footerYear").textContent = String(new Date().getFullYear());
     var payload;
     try {
       payload = await api("/api/session");
       updateFooter(payload);
-      byId("registrationPrompt").dataset.enabled = payload.registrationEnabled ? "true" : "";
+      registrationEnabled = Boolean(payload.registrationEnabled);
       if (payload.authenticated) { await showAuthenticated(payload, false); return; }
     } catch (error) {
       updateFooter({appName: "AI Content Studio", version: ""});
@@ -645,15 +752,17 @@
 
   byId("loginThemeToggle").addEventListener("click", toggleTheme);
   byId("themeToggle").addEventListener("click", toggleTheme);
-  byId("showRegister").addEventListener("click", function () { byId("loginForm").classList.add("hidden"); byId("registrationPrompt").classList.add("hidden"); byId("registerForm").classList.remove("hidden"); byId("registerName").focus(); });
-  byId("hideRegister").addEventListener("click", function () { byId("registerForm").classList.add("hidden"); byId("loginForm").classList.remove("hidden"); byId("registrationPrompt").classList.remove("hidden"); byId("loginUsername").focus(); });
-  byId("showRecovery").addEventListener("click", function () { byId("loginForm").classList.add("hidden"); byId("registrationPrompt").classList.add("hidden"); byId("showRecovery").classList.add("hidden"); byId("recoveryForm").classList.remove("hidden"); byId("recoveryUsername").focus(); });
-  byId("hideRecovery").addEventListener("click", function () { byId("recoveryForm").classList.add("hidden"); byId("loginForm").classList.remove("hidden"); byId("showRecovery").classList.remove("hidden"); byId("loginUsername").focus(); });
+  byId("showRegister").addEventListener("click", function () { renderAuthView("register", "registerName"); });
+  byId("hideRegister").addEventListener("click", function () { byId("registerForm").reset(); setStatus(byId("loginStatus"), "", ""); renderAuthView("login", "loginUsername"); });
+  byId("showRecovery").addEventListener("click", function () { renderAuthView("recovery", "recoveryUsername"); });
+  byId("hideRecovery").addEventListener("click", function () { byId("recoveryForm").reset(); setStatus(byId("loginStatus"), "", ""); renderAuthView("login", "loginUsername"); });
+  byId("recoverySignIn").addEventListener("click", function () { setStatus(byId("loginStatus"), "", ""); renderAuthView("login", "loginUsername"); });
   byId("recoveryForm").addEventListener("submit", async function (event) {
     event.preventDefault();
     try {
       var result = await api("/api/recover", {method: "POST", body: {username: byId("recoveryUsername").value.trim(), recoveryCode: byId("recoveryCode").value.trim(), newPassword: byId("recoveryPassword").value}});
-      setStatus(byId("recoveryStatus"), result.message, "success");
+      setStatus(byId("recoveryStatus"), result.message, result.ok ? "success" : "error");
+      byId("recoverySignIn").classList.toggle("hidden", !result.ok);
       if (result.contactPageUrl) { byId("recoverySupport").innerHTML = 'If you have no valid code, use the configured <a href="' + escapeHtml(safeLink(result.contactPageUrl)) + '" target="_blank" rel="noopener noreferrer">Contact page</a>.'; }
       byId("recoveryForm").reset();
     } catch (error) { setStatus(byId("recoveryStatus"), error.message, "error"); }
@@ -686,9 +795,18 @@
   setSidebar(!window.matchMedia("(max-width: 1080px)").matches);
   byId("navToggle").addEventListener("click", function () { setSidebar(byId("navToggle").getAttribute("aria-expanded") !== "true"); });
   document.querySelectorAll(".nav button").forEach(function (button) { button.addEventListener("click", function () { goTo(button.dataset.tab, true); }); });
-  ["projectFilter", "episodeFilter", "characterFilter"].forEach(function (id) { byId(id).addEventListener("change", render); });
-  byId("toolFilter").addEventListener("change", renderTools);
-  byId("userFilter").addEventListener("change", function () { var users = JSON.parse(byId("userList").dataset.users || "[]"); renderUsers(users); });
+  ["projectFilter", "episodeFilter", "characterFilter"].forEach(function (id) { byId(id).addEventListener("change", function () { listPages[id.replace("Filter", "")] = 0; render(); }); });
+  byId("toolFilter").addEventListener("change", function () { listPages.tool = 0; renderTools(); });
+  byId("userFilter").addEventListener("change", function () { listPages.user = 0; var users = JSON.parse(byId("userList").dataset.users || "[]"); renderUsers(users); });
+  [{kind: "project", render: render}, {kind: "episode", render: render}, {kind: "character", render: render}, {kind: "prompt", render: render}, {kind: "tool", render: renderTools}, {kind: "user", render: function () { renderUsers(JSON.parse(byId("userList").dataset.users || "[]")); }}].forEach(function (list) {
+    byId(list.kind + "Search").addEventListener("input", function () { listPages[list.kind] = 0; list.render(); });
+  });
+  document.addEventListener("click", function (event) {
+    var clear = event.target.closest("[data-clear-search]");
+    if (clear) { var kind = clear.dataset.clearSearch; byId(kind + "Search").value = ""; listPages[kind] = 0; byId(kind + "Search").dispatchEvent(new Event("input")); byId(kind + "Search").focus(); return; }
+    var pageButton = event.target.closest("[data-list-page]");
+    if (pageButton) { var pageKind = pageButton.dataset.listPage; listPages[pageKind] += Number(pageButton.dataset.pageDirection); if (pageKind === "tool") { renderTools(); } else if (pageKind === "user") { renderUsers(JSON.parse(byId("userList").dataset.users || "[]")); } else { render(); } }
+  });
 
   document.querySelectorAll("dialog [data-cancel]").forEach(function (button) { button.addEventListener("click", function () { button.closest("dialog").close("cancel"); }); });
   document.body.addEventListener("click", async function (event) {
@@ -873,14 +991,18 @@
       setStatus(byId("integrationStatus"), error.message, "error");
     }
   });
-  byId("registrationSettingsForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/admin/settings", {method: "PUT", body: {registrationEnabled: byId("registrationEnabled").checked, contactPageUrl: byId("contactPageUrl").value.trim()}}); byId("registrationPrompt").dataset.enabled = result.registrationEnabled ? "true" : ""; setStatus(byId("adminSettingsStatus"), "Settings saved.", "success"); } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); } });
+  byId("registrationSettingsForm").addEventListener("submit", async function (event) { event.preventDefault(); try { var result = await api("/api/admin/settings", {method: "PUT", body: {registrationEnabled: byId("registrationEnabled").checked, contactPageUrl: byId("contactPageUrl").value.trim()}}); registrationEnabled = Boolean(result.registrationEnabled); setStatus(byId("adminSettingsStatus"), "Settings saved.", "success"); } catch (error) { setStatus(byId("adminSettingsStatus"), error.message, "error"); } });
   byId("userList").addEventListener("click", async function (event) {
     var button = event.target.closest("[data-user-action]"); if (!button) { return; }
     var row = button.closest("[data-user-row]"); var action = button.dataset.userAction;
     if (action === "reset") { byId("resetPasswordForm").reset(); byId("resetUserId").value = row.dataset.userRow; byId("requirePasswordChange").checked = true; byId("temporaryPasswordResult").classList.add("hidden"); byId("resetPasswordDialog").showModal(); byId("temporaryPassword").focus(); return; }
     if (action === "mcp") {
       var permissions = {}; row.querySelectorAll("[data-mcp]").forEach(function (input) { permissions[input.dataset.mcp] = input.checked; });
-      try { await api("/api/admin/users/" + row.dataset.userRow + "/mcp", {method: "PUT", body: permissions}); await loadAdmin(); } catch (error) { window.alert(error.message); } return;
+      button.disabled = true;
+      try { await api("/api/admin/users/" + row.dataset.userRow + "/mcp", {method: "PUT", body: permissions}); await loadAdmin(); notify("MCP permissions saved.", "success"); }
+      catch (error) { notify("MCP permissions were not saved: " + error.message, "error"); }
+      finally { button.disabled = false; }
+      return;
     }
     if (action === "delete" && !window.confirm("Permanently delete this account, its workspace, private files, grants, and tokens? This cannot be undone.")) { return; }
     if (["disable", "archive"].includes(action) && !window.confirm((action === "disable" ? "Disable sign-in" : "Archive this account") + " while retaining its workspace and uploads?")) { return; }
@@ -897,23 +1019,55 @@
 
   byId("addTool").addEventListener("click", function () { openToolDialog(null); });
   byId("toolDialog").addEventListener("close", clearToolForm);
-  byId("toolForm").addEventListener("submit", async function (event) { event.preventDefault(); var id = byId("toolId").value; var body = {action: "edit", name: byId("toolName").value.trim(), category: byId("toolCategory").value.trim(), url: byId("toolUrl").value.trim(), purpose: byId("toolPurpose").value.trim(), notes: byId("toolNotes").value.trim()}; var prefix = session.user.role === "admin" ? "/api/admin/tools" : "/api/tools"; try { await api(prefix + (id ? "/" + id : ""), {method: id ? "PUT" : "POST", body: body}); await loadTools(); byId("toolDialog").close(); } catch (error) { setStatus(byId("toolStatus"), error.message, "error"); } });
+  byId("toolForm").addEventListener("submit", async function (event) {
+    event.preventDefault();
+    var button = event.submitter;
+    var id = byId("toolId").value;
+    var body = {action: "edit", name: byId("toolName").value.trim(), category: byId("toolCategory").value.trim(), url: byId("toolUrl").value.trim(), purpose: byId("toolPurpose").value.trim(), notes: byId("toolNotes").value.trim()};
+    var prefix = session.user.role === "admin" ? "/api/admin/tools" : "/api/tools";
+    button.disabled = true;
+    try { var result = await api(prefix + (id ? "/" + id : ""), {method: id ? "PUT" : "POST", body: body}); await loadTools(); byId("toolDialog").close(); if (result.message) { notify(result.message, "success"); } }
+    catch (error) { setStatus(byId("toolStatus"), error.message, "error"); }
+    finally { button.disabled = false; }
+  });
   byId("toolGrid").addEventListener("click", async function (event) {
     var button = event.target.closest("[data-tool-action]"); if (!button) { return; }
     var card = button.closest("[data-tool-id]"); var tool = toolRecords.find(function (item) { return String(item.id) === card.dataset.toolId; }); var action = button.dataset.toolAction;
     if (action === "edit") { openToolDialog(tool); return; }
-    if (action === "assign") {
-      var users = JSON.parse(byId("userList").dataset.users || "[]").filter(function (user) { return user.role === "user" && user.active && !user.archived; });
-      var current = users.filter(function (user) { return tool.assignedUserIds.includes(user.id); }).map(function (user) { return user.username; }).join(", ");
-      var names = window.prompt("Enter usernames to assign, separated by commas. Leave blank to remove all assignments.", current); if (names === null) { return; }
-      var requested = names.split(",").map(function (name) { return name.trim().toLowerCase(); }).filter(Boolean);
-      var ids = users.filter(function (user) { return requested.includes(user.username.toLowerCase()); }).map(function (user) { return user.id; });
-      if (ids.length !== new Set(requested).size) { window.alert("One or more usernames were not active regular users."); return; }
-      await api("/api/admin/tools/" + tool.id, {method: "PUT", body: {action: "assign", userIds: ids}}); await loadTools(); return;
-    }
+    if (action === "assign") { await openAssignmentDialog(tool); return; }
     if (action === "delete" && !window.confirm("Permanently delete this tool and its assignments?")) { return; }
     var prefix = session.user.role === "admin" ? "/api/admin/tools/" : "/api/tools/";
     try { if (action === "delete") { await api(prefix + tool.id, {method: "DELETE"}); } else { await api(prefix + tool.id, {method: "PUT", body: {action: action}}); } await loadTools(); } catch (error) { window.alert(error.message); }
+  });
+  byId("assignmentSearch").addEventListener("input", function () { assignmentPage = 0; renderAssignmentUsers(); });
+  byId("assignmentList").addEventListener("change", function (event) {
+    if (!event.target.matches("[data-assignment-user]")) { return; }
+    var userId = Number(event.target.dataset.assignmentUser);
+    if (event.target.checked) { assignmentSelection.add(userId); } else { assignmentSelection.delete(userId); }
+    renderAssignmentUsers();
+  });
+  byId("assignmentPager").addEventListener("click", function (event) {
+    var button = event.target.closest("[data-assignment-page]");
+    if (!button) { return; }
+    assignmentPage += Number(button.dataset.assignmentPage);
+    renderAssignmentUsers();
+  });
+  byId("toolAssignmentForm").addEventListener("submit", async function (event) {
+    event.preventDefault();
+    var button = byId("assignmentSave");
+    button.disabled = true;
+    setStatus(byId("assignmentStatus"), "Saving assignments...", "");
+    try {
+      await api("/api/admin/tools/" + assignmentTool.id, {method: "PUT", body: {action: "assign", userIds: Array.from(assignmentSelection)}});
+      await loadTools();
+      byId("toolAssignmentDialog").close();
+      notify("Assignments saved.", "success");
+    } catch (error) {
+      setStatus(byId("assignmentStatus"), error.message, "error");
+      notify("Assignments were not saved: " + error.message, "error");
+    } finally {
+      button.disabled = false;
+    }
   });
   bootstrap();
 })();

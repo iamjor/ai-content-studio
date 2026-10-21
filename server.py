@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 APP_NAME = "AI Content Studio"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT / "dist"
 DB_PATH = Path(os.environ.get("AICS_DB_PATH", "/data/studio.sqlite3"))
@@ -87,6 +87,8 @@ PASSWORD_ITERATIONS = 600_000
 LOGIN_LIMIT = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_LOCK_SECONDS = 15 * 60
+LOGIN_ACCOUNT_LIMIT = 20
+LOGIN_SOURCE_LIMIT = 100
 LOGIN_SCOPE_LIMIT = 4_096
 REGISTRATION_ATTEMPT_LIMIT = max(
     1, int(os.environ.get("AICS_REGISTRATION_ATTEMPT_LIMIT", "5"))
@@ -98,6 +100,8 @@ SESSION_SECONDS = int(
         str(int(os.environ.get("AICS_SESSION_HOURS", "12")) * 60 * 60),
     )
 )
+LAST_SEEN_WRITE_SECONDS = 60
+ONLINE_WINDOW_SECONDS = 5 * 60
 COOKIE_SECURE = os.environ.get("AICS_COOKIE_SECURE", "1").strip().lower() not in {
     "0",
     "false",
@@ -108,6 +112,8 @@ REGISTRATION_DEFAULT = os.environ.get(
 ).strip().lower() in {"1", "true", "yes"}
 RECOVERY_CODE_COUNT = 8
 RECOVERY_LIMIT = 5
+RECOVERY_ACCOUNT_LIMIT = 20
+RECOVERY_SOURCE_LIMIT = 50
 RECOVERY_SETUP_SECONDS = 15 * 60
 ADMIN_USERNAME = os.environ.get(
     "AICS_ADMIN_USERNAME", os.environ.get("AICS_USERNAME", "")
@@ -413,6 +419,24 @@ def validate_https_url(value):
         return False
     parsed = urlsplit(value.strip())
     return parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username
+
+
+def canonical_tool_domain(value):
+    """Return a stable HTTPS host identity for duplicate tool prevention."""
+    if not validate_https_url(value):
+        raise ValueError("Invalid tool URL")
+    parsed = urlsplit(value.strip())
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    try:
+        hostname = hostname.encode("idna").decode("ascii")
+        port = parsed.port
+    except (UnicodeError, ValueError) as error:
+        raise ValueError("Invalid tool URL") from error
+    if not hostname:
+        raise ValueError("Invalid tool URL")
+    return hostname if port in {None, 443} else f"{hostname}:{port}"
 
 
 def validate_public_base_url(value):
@@ -903,6 +927,10 @@ def setup():
             database.execute(
                 "ALTER TABLE users ADD COLUMN recovery_setup_required INTEGER NOT NULL DEFAULT 1"
             )
+        if "last_login_at" not in user_columns:
+            database.execute("ALTER TABLE users ADD COLUMN last_login_at INTEGER")
+        if "last_seen_at" not in user_columns:
+            database.execute("ALTER TABLE users ADD COLUMN last_seen_at INTEGER")
         tool_columns = {
             row["name"] for row in database.execute("PRAGMA table_info(tools)")
         }
@@ -910,6 +938,8 @@ def setup():
             database.execute(
                 "ALTER TABLE tools ADD COLUMN owner_user_id INTEGER REFERENCES users(id)"
             )
+        if "canonical_domain" not in tool_columns:
+            database.execute("ALTER TABLE tools ADD COLUMN canonical_domain TEXT")
         token_columns = {
             row["name"] for row in database.execute("PRAGMA table_info(oauth_tokens)")
         }
@@ -955,13 +985,28 @@ def setup():
                 """,
                 ((*tool, now, now) for tool in TOOL_SEEDS),
             )
+        if previous_schema < 7:
+            for tool in database.execute(
+                "SELECT id, url FROM tools WHERE canonical_domain IS NULL"
+            ).fetchall():
+                try:
+                    identity = canonical_tool_domain(tool["url"])
+                except ValueError:
+                    identity = None
+                database.execute(
+                    "UPDATE tools SET canonical_domain=? WHERE id=?",
+                    (identity, tool["id"]),
+                )
+        database.execute(
+            "CREATE INDEX IF NOT EXISTS tools_canonical_domain ON tools(canonical_domain)"
+        )
         if get_setting(database, "registration_enabled") is None:
             set_setting(
                 database,
                 "registration_enabled",
                 "1" if REGISTRATION_DEFAULT else "0",
             )
-        set_setting(database, "schema_version", "6")
+        set_setting(database, "schema_version", "7")
 
         admin = database.execute(
             "SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1"
@@ -1284,7 +1329,7 @@ class Handler(BaseHTTPRequestHandler):
                     s.token_hash, s.csrf_token, s.expires_at,
                     u.id, u.username, u.display_name, u.role, u.is_active,
                     u.archived_at, u.theme, u.must_change_password,
-                    u.recovery_setup_required
+                    u.recovery_setup_required, u.last_login_at, u.last_seen_at
                 FROM sessions s
                 JOIN users u ON u.id=s.user_id
                 WHERE s.token_hash=?
@@ -1303,6 +1348,13 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 self._session_cache = None
                 return None
+            database.execute(
+                """
+                UPDATE users SET last_seen_at=?
+                WHERE id=? AND (last_seen_at IS NULL OR last_seen_at<=?)
+                """,
+                (now, row["id"], now - LAST_SEEN_WRITE_SECONDS),
+            )
         self._session_cache = row
         return row
 
@@ -1946,6 +1998,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.oauth_error(401, "access_denied", "Sign-in failed.")
             with connect() as database:
                 self.release_login_attempt(database, attempt_scope)
+                database.execute(
+                    "UPDATE users SET last_login_at=? WHERE id=?",
+                    (now, user["id"]),
+                )
             user_id = user["id"]
         with connect() as database:
             account = database.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
@@ -2350,8 +2406,16 @@ class Handler(BaseHTTPRequestHandler):
         return peer.compressed
 
     def attempt_scope(self, purpose):
-        """Hash a request purpose and safe client address for bounded throttling."""
+        """Hash a request purpose and trusted client source for throttling."""
         value = purpose + "\0" + self.login_client_address()
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def account_attempt_scope(self, purpose, username, include_source=False):
+        """Hash a normalized account scope without retaining account identifiers."""
+        normalized = username.strip().casefold()
+        value = purpose + "\0" + normalized
+        if include_source:
+            value += "\0" + self.login_client_address()
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     def cleanup_expired_oauth_records(self, database, now):
@@ -2474,44 +2538,66 @@ class Handler(BaseHTTPRequestHandler):
             (LOGIN_SCOPE_LIMIT,),
         )
 
-    def reserve_attempt(self, database, scope, now, limit):
-        """Atomically reserve one attempt before expensive or sensitive work."""
+    def reserve_attempts(self, database, scoped_limits, now):
+        """Atomically reserve related account and source scopes before verification."""
         database.execute("BEGIN IMMEDIATE")
         self.prune_attempts(database, now)
-        remaining = self.attempt_blocked(database, scope, now)
-        if remaining:
-            return False, remaining, 0
-        block_after_failure = self.record_attempt(
-            database, scope, now, limit
-        )
+        for scope, _ in scoped_limits:
+            remaining = self.attempt_blocked(database, scope, now)
+            if remaining:
+                return False, remaining, 0
+        block_after_failure = 0
+        for scope, limit in scoped_limits:
+            block_after_failure = max(
+                block_after_failure,
+                self.record_attempt(database, scope, now, limit),
+            )
+        self.prune_attempts(database, now)
         return True, 0, block_after_failure
 
-    def release_login_attempt(self, database, scope):
-        """Release a successful reservation without erasing concurrent failures."""
+    def reserve_attempt(self, database, scope, now, limit):
+        """Reserve one legacy endpoint scope through the shared atomic helper."""
+        return self.reserve_attempts(database, ((scope, limit),), now)
+
+    def release_attempts(self, database, scoped_limits):
+        """Release only reservations made by one successful authentication."""
         database.execute("BEGIN IMMEDIATE")
-        row = database.execute(
-            "SELECT failures FROM login_attempts WHERE scope_hash=?", (scope,)
-        ).fetchone()
-        if not row:
-            return
-        failures = max(0, row["failures"] - 1)
-        if failures == 0:
-            database.execute(
-                "DELETE FROM login_attempts WHERE scope_hash=?", (scope,)
+        now = int(time.time())
+        for scope, limit in scoped_limits:
+            row = database.execute(
+                "SELECT failures FROM login_attempts WHERE scope_hash=?", (scope,)
+            ).fetchone()
+            if not row:
+                continue
+            failures = max(0, row["failures"] - 1)
+            if failures == 0:
+                database.execute(
+                    "DELETE FROM login_attempts WHERE scope_hash=?", (scope,)
+                )
+                continue
+            blocked_until = (
+                0 if failures < limit else now + LOGIN_LOCK_SECONDS
             )
-            return
-        blocked_until = (
-            0
-            if failures < LOGIN_LIMIT
-            else int(time.time()) + LOGIN_LOCK_SECONDS
-        )
-        database.execute(
-            """
-            UPDATE login_attempts
-            SET failures=?, blocked_until=?
-            WHERE scope_hash=?
-            """,
-            (failures, blocked_until, scope),
+            database.execute(
+                """
+                UPDATE login_attempts
+                SET failures=?, blocked_until=?
+                WHERE scope_hash=?
+                """,
+                (failures, blocked_until, scope),
+            )
+
+    def release_login_attempt(self, database, scope):
+        """Retain compatibility for single-scope registration and OAuth callers."""
+        self.release_attempts(database, ((scope, LOGIN_LIMIT),))
+
+    def throttle_reply(self, remaining):
+        """Return a bounded retry interval in both the response body and header."""
+        wait = max(1, int(remaining))
+        return self.json_reply(
+            429,
+            {"error": f"Too many attempts. Try again in {wait} seconds."},
+            {"Retry-After": str(wait)},
         )
 
     def login(self):
@@ -2533,18 +2619,21 @@ class Handler(BaseHTTPRequestHandler):
             or len(password) > 256
         ):
             return self.json_reply(400, {"error": "Enter a username and password."})
-        scope = self.attempt_scope("login")
+        username = username.strip()
+        scoped_limits = (
+            (self.account_attempt_scope("login-account-source", username, True),
+             LOGIN_LIMIT),
+            (self.account_attempt_scope("login-account", username),
+             LOGIN_ACCOUNT_LIMIT),
+            (self.attempt_scope("login-source"), LOGIN_SOURCE_LIMIT),
+        )
         now = int(time.time())
         with connect() as database:
-            accepted, remaining, block_after_failure = self.reserve_attempt(
-                database, scope, now, LOGIN_LIMIT
+            accepted, remaining, block_after_failure = self.reserve_attempts(
+                database, scoped_limits, now
             )
             if not accepted:
-                return self.json_reply(
-                    429,
-                    {"error": "Too many attempts. Try again later."},
-                    {"Retry-After": str(remaining)},
-                )
+                return self.throttle_reply(remaining)
             user = database.execute(
                 "SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)
             ).fetchone()
@@ -2553,21 +2642,16 @@ class Handler(BaseHTTPRequestHandler):
         password_matches = verify_password(password, encoded)
         valid = bool(user and user["is_active"] and password_matches)
         if not valid:
-            status = 429 if block_after_failure else 401
-            message = (
-                "Too many attempts. Try again later."
-                if block_after_failure
-                else "Invalid username or password."
-            )
-            headers = (
-                {"Retry-After": str(block_after_failure)}
-                if block_after_failure
-                else None
-            )
-            return self.json_reply(status, {"error": message}, headers)
+            if block_after_failure:
+                return self.throttle_reply(block_after_failure)
+            return self.json_reply(401, {"error": "Invalid username or password."})
 
         with connect() as database:
-            self.release_login_attempt(database, scope)
+            self.release_attempts(database, scoped_limits)
+            database.execute(
+                "UPDATE users SET last_login_at=?, last_seen_at=? WHERE id=?",
+                (now, now, user["id"]),
+            )
             database.execute(
                 "DELETE FROM sessions WHERE expires_at<=?", (now,)
             )
@@ -2693,13 +2777,18 @@ class Handler(BaseHTTPRequestHandler):
             [("Set-Cookie", self.session_cookie(raw_token, SESSION_SECONDS))],
         )
 
-    def generic_recovery_reply(self):
-        """Return one non-enumerating response for every recovery outcome."""
+    def generic_recovery_reply(self, success=False):
+        """Return one public-safe shape with explicit success or generic failure."""
         with connect() as database:
             contact_url = get_setting(database, "contact_page_url", "")
+        message = (
+            "Password changed. Return to Sign in with your new password."
+            if success else
+            "Password could not be reset. Check the username and enter an unused recovery code."
+        )
         return self.json_reply(200, {
-            "ok": True,
-            "message": "If the account and unused recovery code were valid, the password was changed. Sign in with the new password.",
+            "ok": bool(success),
+            "message": message,
             "contactPageUrl": contact_url,
         }, [("Set-Cookie", self.session_cookie("", 0))])
 
@@ -2718,23 +2807,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.generic_recovery_reply()
         if len(username) > 40 or len(code) > 80 or not validate_password(password):
             return self.generic_recovery_reply()
+        username = username.strip()
         now = int(time.time())
-        source_scope = self.attempt_scope("recovery-source")
-        account_scope = hashlib.sha256(
-            ("recovery-account\0" + username.casefold()).encode("utf-8")
-        ).hexdigest()
+        scoped_limits = (
+            (self.account_attempt_scope("recovery-account-source", username, True),
+             RECOVERY_LIMIT),
+            (self.account_attempt_scope("recovery-account", username),
+             RECOVERY_ACCOUNT_LIMIT),
+            (self.attempt_scope("recovery-source"), RECOVERY_SOURCE_LIMIT),
+        )
         with connect() as database:
-            accepted, remaining, _ = self.reserve_attempt(
-                database, source_scope, now, RECOVERY_LIMIT
+            accepted, remaining, block_after_failure = self.reserve_attempts(
+                database, scoped_limits, now
             )
         if not accepted:
-            return self.json_reply(429, {"error": "Too many attempts. Try again later."}, {"Retry-After": str(remaining)})
-        with connect() as database:
-            accepted, remaining, _ = self.reserve_attempt(
-                database, account_scope, now, RECOVERY_LIMIT
-            )
-        if not accepted:
-            return self.json_reply(429, {"error": "Too many attempts. Try again later."}, {"Retry-After": str(remaining)})
+            return self.throttle_reply(remaining)
         password_hash = hash_password(password)
         success = False
         with connect() as database:
@@ -2783,10 +2870,11 @@ class Handler(BaseHTTPRequestHandler):
                     success = True
         if success:
             with connect() as database:
-                self.release_login_attempt(database, source_scope)
-            with connect() as database:
-                self.release_login_attempt(database, account_scope)
-        return self.generic_recovery_reply()
+                self.release_attempts(database, scoped_limits)
+            return self.generic_recovery_reply(True)
+        if block_after_failure:
+            return self.throttle_reply(block_after_failure)
+        return self.generic_recovery_reply(False)
 
     def generate_account_recovery_codes(self, session):
         """Create a replacement recovery set and return plaintext exactly once."""
@@ -2824,7 +2912,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(201, {"codes": codes, "setId": set_id})
 
     def confirm_account_recovery_codes(self, session):
-        """Confirm possession of one freshly generated code without consuming it."""
+        """Atomically consume one code while confirming its freshly generated set."""
         try:
             value = self.read_json(AUTH_MAX_BYTES)
         except ValueError:
@@ -2838,13 +2926,43 @@ class Handler(BaseHTTPRequestHandler):
         with connect() as database:
             database.execute("BEGIN IMMEDIATE")
             rows = database.execute(
-                "SELECT * FROM recovery_codes WHERE user_id=? AND set_id=? AND confirmed_at IS NULL AND created_at>?",
-                (session["id"], set_id, now - RECOVERY_SETUP_SECONDS),
+                "SELECT * FROM recovery_codes WHERE user_id=? AND set_id=? AND confirmed_at IS NULL AND created_at>? ORDER BY id LIMIT ?",
+                (session["id"], set_id, now - RECOVERY_SETUP_SECONDS,
+                 RECOVERY_CODE_COUNT),
             ).fetchall()
-            if not any(verify_recovery_code(code, row["salt"], row["code_hash"]) for row in rows):
-                return self.json_reply(400, {"error": "That code did not match the new set."})
+            candidates = list(rows) + [None] * (RECOVERY_CODE_COUNT - len(rows))
+            matches = [
+                verify_recovery_code(
+                    code,
+                    row["salt"] if row else RECOVERY_DUMMY_SALT,
+                    row["code_hash"] if row else RECOVERY_DUMMY_HASH,
+                )
+                for row in candidates
+            ]
+            matched = next((
+                row for row, matches_code in zip(candidates, matches)
+                if row is not None and row["used_at"] is None and matches_code
+            ), None)
+            if not matched:
+                return self.json_reply(
+                    400, {"error": "That code did not match the new set."}
+                )
+            consumed = database.execute(
+                """
+                UPDATE recovery_codes SET used_at=?, confirmed_at=?
+                WHERE id=? AND used_at IS NULL AND confirmed_at IS NULL
+                """,
+                (now, now, matched["id"]),
+            )
+            if consumed.rowcount != 1:
+                return self.json_reply(
+                    400, {"error": "That code did not match the new set."}
+                )
             database.execute(
-                "UPDATE recovery_codes SET confirmed_at=? WHERE user_id=? AND set_id=?",
+                """
+                UPDATE recovery_codes SET confirmed_at=?
+                WHERE user_id=? AND set_id=? AND confirmed_at IS NULL
+                """,
                 (now, session["id"], set_id),
             )
             database.execute(
@@ -3297,20 +3415,53 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(200, {"ok": True, "user": public_user(user)})
 
     def get_users(self):
-        """List public account metadata for basic administrator management."""
+        """List administrator-visible accounts with bounded session presence."""
+        now = int(time.time())
         with connect() as database:
             rows = database.execute(
                 """
-                SELECT * FROM users
-                ORDER BY created_at, id
-                """
+                SELECT u.*,
+                    EXISTS(
+                        SELECT 1 FROM sessions s
+                        WHERE s.user_id=u.id AND s.expires_at>?
+                    ) AS has_live_session,
+                    p.enabled AS mcp_enabled,
+                    p.can_read AS mcp_read,
+                    p.can_write AS mcp_write,
+                    p.can_archive AS mcp_archive,
+                    p.can_delete AS mcp_delete
+                FROM users u
+                LEFT JOIN mcp_permissions p ON p.user_id=u.id
+                ORDER BY u.created_at, u.id
+                """,
+                (now,),
             ).fetchall()
         users = []
         for row in rows:
             item = public_user(row)
             item["createdAt"] = row["created_at"]
-            with connect() as permission_database:
-                item["mcpPermissions"] = mcp_permissions(permission_database, row["id"], row["role"])
+            item["lastLoginAt"] = row["last_login_at"]
+            item["lastSeenAt"] = row["last_seen_at"]
+            item["online"] = bool(
+                row["is_active"]
+                and row["archived_at"] is None
+                and row["last_seen_at"] is not None
+                and row["last_seen_at"] >= now - ONLINE_WINDOW_SECONDS
+                and row["has_live_session"]
+            )
+            if row["role"] == "admin":
+                item["mcpPermissions"] = {
+                    "enabled": True, "read": True, "write": True,
+                    "archive": True, "delete": True,
+                }
+            else:
+                item["mcpPermissions"] = {
+                    "enabled": bool(row["mcp_enabled"]),
+                    "read": bool(row["mcp_read"]),
+                    "write": bool(row["mcp_write"]),
+                    "archive": bool(row["mcp_archive"]),
+                    "delete": bool(row["mcp_delete"]),
+                }
             users.append(item)
         return self.json_reply(200, {"users": users})
 
@@ -3565,12 +3716,10 @@ class Handler(BaseHTTPRequestHandler):
                     ) AS assigned
                     FROM tools
                     WHERE tools.archived_at IS NULL AND (
-                        tools.owner_user_id=? OR (
-                            tools.owner_user_id IS NULL AND EXISTS(
+                        tools.owner_user_id=? OR EXISTS(
                                 SELECT 1 FROM tool_assignments a
                                 WHERE a.tool_id=tools.id AND a.user_id=?
                             )
-                        )
                     )
                     ORDER BY category, name, id
                     """, (session["id"], session["id"], session["id"]),
@@ -3578,23 +3727,79 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(200, {"tools": [self.serialize_tool(row, session) for row in rows]})
 
     def create_tool(self, session):
-        """Create an admin catalog tool or a private user-owned tool."""
+        """Create a tool or safely reuse one active canonical domain."""
         try:
             value = self.tool_payload()
+            identity = canonical_tool_domain(value["url"])
         except ValueError:
-            return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
+            return self.json_reply(
+                400, {"error": "Enter valid tool details and an HTTPS URL."}
+            )
         now = int(time.time())
         owner_id = None if session["role"] == "admin" else session["id"]
         with connect() as database:
+            database.execute("BEGIN IMMEDIATE")
+            existing = database.execute(
+                """
+                SELECT tools.*, EXISTS(
+                    SELECT 1 FROM tool_assignments a
+                    WHERE a.tool_id=tools.id AND a.user_id=?
+                ) AS assigned
+                FROM tools
+                WHERE canonical_domain=? AND archived_at IS NULL
+                ORDER BY id LIMIT 1
+                """,
+                (session["id"], identity),
+            ).fetchone()
+            if existing:
+                if session["role"] != "admin":
+                    if existing["owner_user_id"] is None:
+                        database.execute(
+                            """
+                            INSERT OR IGNORE INTO tool_assignments
+                                (tool_id, user_id, created_at)
+                            VALUES (?, ?, ?)
+                            """,
+                            (existing["id"], session["id"], now),
+                        )
+                        existing = database.execute(
+                            "SELECT tools.*, 1 AS assigned FROM tools WHERE id=?",
+                            (existing["id"],),
+                        ).fetchone()
+                    else:
+                        return self.json_reply(
+                            409,
+                            {"error": "That tool domain already exists. Ask an administrator to share it."},
+                        )
+                return self.json_reply(
+                    200,
+                    {
+                        "tool": self.serialize_tool(existing, session),
+                        "linkedToExisting": True,
+                        "message": (
+                            "The existing admin tool was assigned to your account."
+                            if session["role"] != "admin"
+                            else "The existing canonical tool was retained."
+                        ),
+                    },
+                )
             cursor = database.execute(
                 """
                 INSERT INTO tools
-                    (name, category, url, purpose, notes, owner_user_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (*value.values(), owner_id, now, now),
+                    (name, category, url, purpose, notes, owner_user_id,
+                     canonical_domain, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*value.values(), owner_id, identity, now, now),
             )
-            row = database.execute("SELECT tools.*, 0 AS assigned FROM tools WHERE id=?", (cursor.lastrowid,)).fetchone()
-        return self.json_reply(201, {"tool": self.serialize_tool(row, session)})
+            row = database.execute(
+                "SELECT tools.*, 0 AS assigned FROM tools WHERE id=?",
+                (cursor.lastrowid,),
+            ).fetchone()
+        return self.json_reply(
+            201,
+            {"tool": self.serialize_tool(row, session), "linkedToExisting": False},
+        )
 
     def update_tool(self, path, session):
         """Edit a manageable tool or apply admin-only lifecycle and assignments."""
@@ -3616,14 +3821,14 @@ class Handler(BaseHTTPRequestHandler):
             now = int(time.time())
             if action in {"archive", "restore"}:
                 database.execute("UPDATE tools SET archived_at=?, updated_at=? WHERE id=?", (now if action == "archive" else None, now, tool_id))
-            elif action == "assign" and admin and row["owner_user_id"] is None:
+            elif action == "assign" and admin:
                 user_ids = value.get("userIds")
                 if not isinstance(user_ids, list) or len(user_ids) > MAX_USERS or any(type(item) is not int for item in user_ids):
                     return self.json_reply(400, {"error": "Choose valid users."})
                 valid = {item["id"] for item in database.execute(
                     "SELECT id FROM users WHERE role='user' AND is_active=1 AND archived_at IS NULL"
                 ).fetchall()}
-                if set(user_ids) - valid:
+                if row["owner_user_id"] in set(user_ids) or set(user_ids) - valid:
                     return self.json_reply(400, {"error": "Choose valid users."})
                 database.execute("DELETE FROM tool_assignments WHERE tool_id=?", (tool_id,))
                 database.executemany(
@@ -3633,15 +3838,32 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "edit":
                 try:
                     fields = self.tool_payload_from_value(value)
+                    identity = canonical_tool_domain(fields["url"])
                 except ValueError:
                     return self.json_reply(400, {"error": "Enter valid tool details and an HTTPS URL."})
+                duplicate = database.execute(
+                    "SELECT id FROM tools WHERE canonical_domain=? AND archived_at IS NULL AND id<>? ORDER BY id LIMIT 1",
+                    (identity, tool_id),
+                ).fetchone()
+                if duplicate:
+                    return self.json_reply(409, {"error": "That tool domain already exists."})
                 database.execute(
-                    "UPDATE tools SET name=?, category=?, url=?, purpose=?, notes=?, updated_at=? WHERE id=?",
-                    (*fields.values(), now, tool_id),
+                    "UPDATE tools SET name=?, category=?, url=?, purpose=?, notes=?, canonical_domain=?, updated_at=? WHERE id=?",
+                    (*fields.values(), identity, now, tool_id),
                 )
             else:
                 return self.json_reply(400, {"error": "Choose a valid tool action."})
-            updated = database.execute("SELECT tools.*, 0 AS assigned FROM tools WHERE id=?", (tool_id,)).fetchone()
+            updated = database.execute(
+                """
+                SELECT tools.*, 0 AS assigned, COALESCE((
+                    SELECT GROUP_CONCAT(a.user_id)
+                    FROM tool_assignments a
+                    WHERE a.tool_id=tools.id
+                ), '') AS assigned_user_ids
+                FROM tools WHERE id=?
+                """,
+                (tool_id,),
+            ).fetchone()
         return self.json_reply(200, {"tool": self.serialize_tool(updated, session)})
 
     def delete_tool(self, path, session):

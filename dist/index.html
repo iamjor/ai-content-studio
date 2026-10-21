@@ -39,18 +39,35 @@
         <p>Sign in to your private projects, episodes, characters, and production notes.</p>
       </div>
 
-      <form id="loginForm" class="auth-form">
-        <label class="field">Username
-          <input id="loginUsername" type="text" name="username" autocomplete="username" required maxlength="40">
-        </label>
-        <label class="field">Password
-          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required maxlength="256">
-        </label>
-        <p class="form-status" id="loginStatus" role="status" aria-live="polite"></p>
-        <button class="btn primary wide" type="submit">Sign in</button>
-      </form>
+      <div class="auth-panel">
+        <form id="loginForm" class="auth-form">
+          <label class="field">Username
+            <input id="loginUsername" type="text" name="username" autocomplete="username" required maxlength="40">
+          </label>
+          <label class="field">Password
+            <input id="loginPassword" name="password" type="password" autocomplete="current-password" required maxlength="256">
+          </label>
+          <p class="form-status" id="loginStatus" role="status" aria-live="polite"></p>
+          <button class="btn primary wide" type="submit">Sign in</button>
+        </form>
 
-        <button class="text-btn" id="showRecovery" type="button">Forgot password?</button>
+        <div class="auth-helper-row" id="authHelpers">
+          <button class="text-btn hidden" id="showRegister" type="button">Create an account</button>
+          <button class="text-btn" id="showRecovery" type="button">Forgot password?</button>
+        </div>
+
+        <form id="registerForm" class="auth-form hidden" aria-labelledby="registerTitle">
+          <div class="form-heading">
+            <div><div class="eyebrow">Registration</div><h2 id="registerTitle">Create your private workspace</h2></div>
+            <button class="icon-btn" id="hideRegister" type="button" aria-label="Return to sign in">×</button>
+          </div>
+          <label class="field">Display name<input id="registerName" type="text" name="displayName" autocomplete="name" required maxlength="80"></label>
+          <label class="field">Username<input id="registerUsername" type="text" name="username" autocomplete="username" required minlength="3" maxlength="40" pattern="[A-Za-z0-9_.-]+"></label>
+          <label class="field">Password<input id="registerPassword" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256"></label>
+          <p class="field-help">Use at least 12 characters. New accounts are always regular users.</p>
+          <p class="form-status" id="registerStatus" role="status" aria-live="polite"></p>
+          <button class="btn primary wide" type="submit">Create account</button>
+        </form>
 
         <form id="recoveryForm" class="auth-form hidden" aria-labelledby="recoveryTitle">
           <div class="form-heading"><div><div class="eyebrow">No email required</div><h2 id="recoveryTitle">Recover your account</h2></div><button class="icon-btn" id="hideRecovery" type="button" aria-label="Return to sign in">×</button></div>
@@ -60,10 +77,12 @@
           <p class="field-help" id="recoverySupport">Responses do not reveal whether an account exists. If you have no valid code, contact the site administrator.</p>
           <p class="form-status" id="recoveryStatus" role="status" aria-live="polite"></p>
           <button class="btn primary wide" type="submit">Reset password</button>
+          <button class="btn wide hidden" id="recoverySignIn" type="button">Return to Sign in</button>
         </form>
 
         <section id="securitySetup" class="auth-form hidden" aria-labelledby="securitySetupTitle">
-          <div class="eyebrow">Required security setup</div><h2 id="securitySetupTitle">Secure your account</h2>
+          <div class="eyebrow">Required security setup</div>
+          <h2 id="securitySetupTitle">Secure your account</h2>
           <form id="forcedPasswordForm" class="hidden">
             <p>Your temporary password must be replaced before entering the dashboard.</p>
             <label class="field">Temporary password<input id="forcedCurrentPassword" type="password" autocomplete="current-password" maxlength="256"></label>
@@ -78,32 +97,7 @@
           </div>
           <p class="form-status" id="securitySetupStatus" role="status" aria-live="polite"></p>
         </section>
-      <div id="registrationPrompt" class="auth-switch hidden">
-        <span>New to the studio?</span>
-        <button class="text-btn" id="showRegister" type="button">Create an account</button>
       </div>
-
-      <form id="registerForm" class="auth-form hidden" aria-labelledby="registerTitle">
-        <div class="form-heading">
-          <div>
-            <div class="eyebrow">Registration</div>
-            <h2 id="registerTitle">Create your private workspace</h2>
-          </div>
-          <button class="icon-btn" id="hideRegister" type="button" aria-label="Return to sign in">×</button>
-        </div>
-        <label class="field">Display name
-          <input id="registerName" type="text" name="displayName" autocomplete="name" required maxlength="80">
-        </label>
-        <label class="field">Username
-          <input id="registerUsername" type="text" name="username" autocomplete="username" required minlength="3" maxlength="40" pattern="[A-Za-z0-9_.-]+">
-        </label>
-        <label class="field">Password
-          <input id="registerPassword" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
-        </label>
-        <p class="field-help">Use at least 12 characters. New accounts are always regular users.</p>
-        <p class="form-status" id="registerStatus" role="status" aria-live="polite"></p>
-        <button class="btn primary wide" type="submit">Create account</button>
-      </form>
     </div>
   </section>
 
@@ -153,6 +147,7 @@
             <input class="sr" type="file" accept="application/json" id="file">
           </div>
         </header>
+        <div class="app-notification hidden" id="appNotification" role="status" aria-live="polite" aria-atomic="true"></div>
 
         <section class="section active" id="overview" aria-labelledby="overviewTitle">
           <div class="hero">
@@ -189,7 +184,8 @@
             <div><h2 id="projectsTitle">Projects</h2><p>Archive finished work or restore it later.</p></div>
             <div class="action-row"><label class="compact-field">View<select id="projectFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" data-new type="button">+ New project</button></div>
           </div>
-          <div class="grid" id="projectGrid"></div>
+          <div class="list-controls"><label class="search-field" for="projectSearch">Search projects<input id="projectSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="project">Clear search</button><span id="projectResults" role="status" aria-live="polite"></span></div>
+          <div class="grid" id="projectGrid"></div><div class="pager" id="projectPager"></div>
         </section>
 
         <section class="section" id="episodes" aria-labelledby="episodesTitle">
@@ -201,7 +197,8 @@
             <div><h2 id="episodesTitle">Episodes &amp; scripts</h2><p>Each project keeps its own timeline and production status.</p></div>
             <div class="action-row"><label class="compact-field">View<select id="episodeFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addEpisode" type="button">+ Episode</button></div>
           </div>
-          <div class="grid" id="episodeGrid"></div>
+          <div class="list-controls"><label class="search-field" for="episodeSearch">Search episodes<input id="episodeSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="episode">Clear search</button><span id="episodeResults" role="status" aria-live="polite"></span></div>
+          <div class="grid" id="episodeGrid"></div><div class="pager" id="episodePager"></div>
         </section>
 
         <section class="section" id="characters" aria-labelledby="charactersTitle">
@@ -213,7 +210,8 @@
             <div><h2 id="charactersTitle">Cast &amp; signature assets</h2></div>
             <div class="action-row"><label class="compact-field">View<select id="characterFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addCharacter" type="button">+ Character</button></div>
           </div>
-          <div class="grid" id="characterGrid"></div>
+          <div class="list-controls"><label class="search-field" for="characterSearch">Search characters<input id="characterSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="character">Clear search</button><span id="characterResults" role="status" aria-live="polite"></span></div>
+          <div class="grid" id="characterGrid"></div><div class="pager" id="characterPager"></div>
         </section>
 
         <section class="section" id="prompts" aria-labelledby="promptsTitle">
@@ -225,7 +223,8 @@
             <div><h2 id="promptsTitle">Prompt library</h2><p>Save reusable production instructions and copy them when needed.</p></div>
             <button class="btn primary" id="addPrompt" type="button">+ Prompt</button>
           </div>
-          <div class="grid" id="promptGrid"></div>
+          <div class="list-controls"><label class="search-field" for="promptSearch">Search prompts<input id="promptSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="prompt">Clear search</button><span id="promptResults" role="status" aria-live="polite"></span></div>
+          <div class="grid" id="promptGrid"></div><div class="pager" id="promptPager"></div>
         </section>
 
         <section class="section" id="workflow" aria-labelledby="workflowTitle">
@@ -250,7 +249,8 @@
 
         <section class="section" id="tools" aria-labelledby="toolsTitle">
           <div class="rowhead"><div><h2 id="toolsTitle">Production tools</h2><p>Your private tools plus admin tools assigned to you.</p></div><div class="action-row" id="toolAdminActions"><label class="compact-field" id="toolFilterWrap">View<select id="toolFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addTool" type="button">+ Add tool</button></div></div>
-          <div class="stack" id="toolGrid"></div>
+          <div class="list-controls"><label class="search-field" for="toolSearch">Search tool catalog<input id="toolSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="tool">Clear search</button><span id="toolResults" role="status" aria-live="polite"></span></div>
+          <div class="stack" id="toolGrid"></div><div class="pager" id="toolPager"></div>
           <div class="rowhead"><div><h2>Cost and rights</h2></div></div>
           <div class="notice">Cloud video credits and free exports can change. Keep clean masters and approved character references. Use music with rights for every platform where you publish.</div>
         </section>
@@ -321,7 +321,8 @@
             <p class="form-status" id="adminSettingsStatus" role="status"></p>
           </form>
           <div class="rowhead"><div><h2>Users</h2><p>Disable or archive without losing data. Permanent deletion removes only the selected account workspace and uploads.</p></div><label class="compact-field">View<select id="userFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
-          <div class="user-list" id="userList"></div>
+          <div class="list-controls"><label class="search-field" for="userSearch">Search users<input id="userSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="user">Clear search</button><span id="userResults" role="status" aria-live="polite"></span></div>
+          <div class="user-list" id="userList"></div><div class="pager" id="userPager"></div>
         </section>
       </main>
     </div>
@@ -345,6 +346,18 @@
       <label class="field">Optional notes<textarea id="toolNotes" class="textarea-short" maxlength="500"></textarea></label>
       <p class="form-status" id="toolStatus" role="status" aria-live="polite"></p>
       <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Save tool</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal assignment-dialog" id="toolAssignmentDialog" aria-labelledby="assignmentTitle">
+    <form id="toolAssignmentForm">
+      <div class="eyebrow">Tool access</div><h2 id="assignmentTitle">Assign users</h2>
+      <p>Recipients receive View and Use only. The original owner keeps management access.</p>
+      <label class="field" for="assignmentSearch">Search eligible users<input id="assignmentSearch" type="search" autocomplete="off"></label>
+      <p id="assignmentResultCount" role="status" aria-live="polite"></p>
+      <div class="assignment-list" id="assignmentList"></div><div class="pager" id="assignmentPager"></div>
+      <p class="form-status" id="assignmentStatus" role="status" aria-live="polite"></p>
+      <div class="modalactions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" id="assignmentSave" type="submit">Save assignments</button></div>
     </form>
   </dialog>
 
@@ -424,7 +437,7 @@
       <label class="field">Optional source notes<textarea id="promptSourceNotes" class="textarea-medium" maxlength="20000"></textarea></label>
       <label class="field">Optional model / settings<textarea id="promptSettings" class="textarea-short" maxlength="5000"></textarea></label>
       <label class="field">Private attachments<input id="promptAttachments" type="file" multiple accept=".pdf,.docx,.md,.markdown,.txt,image/png,image/jpeg,image/webp"><span class="field-help">PDF, DOCX, Markdown, text, PNG, JPEG, or WebP. Maximum 20 MB each, 20 files and 100 MB per prompt. PDF and DOCX text is not extracted.</span></label>
-      <div class="stack" id="promptAttachmentList"></div>
+      <div class="attachment-list" id="promptAttachmentList"></div>
       <div class="modalactions"><button class="btn danger hidden" id="deletePrompt" type="button">Delete prompt</button><button class="btn" type="button" data-cancel>Cancel</button><button class="btn primary" type="submit">Save prompt</button></div>
     </form>
   </dialog>

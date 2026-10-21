@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-60a5fa.svg"></a>
-  <img alt="Version 0.4.0" src="https://img.shields.io/badge/version-0.4.0-60a5fa.svg">
+  <img alt="Version 0.4.1" src="https://img.shields.io/badge/version-0.4.1-60a5fa.svg">
   <img alt="Python 3.13" src="https://img.shields.io/badge/Python-3.13-3776AB.svg">
 </p>
 
@@ -65,7 +65,7 @@ Open `http://127.0.0.1:8787`. Never use `AICS_COOKIE_SECURE=0` for a publicly re
 
 ## Security defaults and limitations
 
-Registration starts disabled and can create regular users only. Passwords use salted PBKDF2-SHA256 records. Sessions are server-side, fixed-lifetime, and sent in HttpOnly, SameSite Strict cookies that are Secure by default. State changes require a session CSRF token and same-origin context. Login, enabled account registration, public OAuth client registration, and OAuth authorization-flow creation have bounded, source-based throttles. Forwarded client addresses are accepted only from explicitly trusted proxy networks. Compose exposes the service on loopback only.
+Registration starts disabled and can create regular users only. Passwords use salted PBKDF2-SHA256 records. Sessions are server-side, fixed-lifetime, and sent in HttpOnly, SameSite Strict cookies that are Secure by default. State changes require a session CSRF token and same-origin context. Login uses a normal account-and-source limit, a bounded normalized-account limit across changing sources, and a higher source ceiling so one account cannot cheaply deny service to neighboring accounts. Recovery has separate hashed scopes. Enabled account registration, public OAuth client registration, and OAuth authorization-flow creation retain bounded source-based throttles. Forwarded client addresses are accepted only from explicitly trusted proxy networks. Compose exposes the service on loopback only.
 
 Remote MCP clients discover OAuth metadata on the same origin and use authorization code plus S256 PKCE. Access and refresh tokens are random and stored only as hashes. Browser cookies are not accepted as MCP credentials. Users can review and revoke integrations from Account. Private image upload and deletion remain browser-only.
 
@@ -77,6 +77,7 @@ The project does not provide email verification, password-reset email, MFA, or e
 
 - [Technical reference](docs/TECHNICAL.md)
 - [Deployment, migration, backup, and rollback](docs/DEPLOYMENT.md)
+- [Version 0.4.1 release notes](docs/RELEASE_NOTES_v0.4.1.md)
 - [Version 0.4.0 release notes](docs/RELEASE_NOTES_v0.4.0.md)
 - [Version 0.3.0 release notes](docs/RELEASE_NOTES_v0.3.0.md)
 - [Version 0.2.0 release notes](docs/RELEASE_NOTES_v0.2.0.md)
