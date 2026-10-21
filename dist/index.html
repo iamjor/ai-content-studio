@@ -184,7 +184,7 @@
             <div><h2 id="projectsTitle">Projects</h2><p>Archive finished work or restore it later.</p></div>
             <div class="action-row"><label class="compact-field">View<select id="projectFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" data-new type="button">+ New project</button></div>
           </div>
-          <div class="list-controls"><label class="search-field" for="projectSearch">Search projects<input id="projectSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="project">Clear search</button><span id="projectResults" role="status" aria-live="polite"></span></div>
+          <div class="list-controls"><div class="search-control" data-search-control="project"><label class="sr" for="projectSearch">Search projects</label><div class="search-input-wrap"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.25 4.25"/></svg><input id="projectSearch" type="search" autocomplete="off" placeholder="Search projects" aria-describedby="projectResults"><button class="search-clear hidden" type="button" data-clear-search="project" aria-label="Clear project search"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div></div><span class="search-result-count" id="projectResults" role="status" aria-live="polite"></span></div>
           <div class="grid" id="projectGrid"></div><div class="pager" id="projectPager"></div>
         </section>
 
@@ -197,7 +197,7 @@
             <div><h2 id="episodesTitle">Episodes &amp; scripts</h2><p>Each project keeps its own timeline and production status.</p></div>
             <div class="action-row"><label class="compact-field">View<select id="episodeFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addEpisode" type="button">+ Episode</button></div>
           </div>
-          <div class="list-controls"><label class="search-field" for="episodeSearch">Search episodes<input id="episodeSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="episode">Clear search</button><span id="episodeResults" role="status" aria-live="polite"></span></div>
+          <div class="list-controls"><div class="search-control" data-search-control="episode"><label class="sr" for="episodeSearch">Search episodes</label><div class="search-input-wrap"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.25 4.25"/></svg><input id="episodeSearch" type="search" autocomplete="off" placeholder="Search episodes" aria-describedby="episodeResults"><button class="search-clear hidden" type="button" data-clear-search="episode" aria-label="Clear episode search"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div></div><span class="search-result-count" id="episodeResults" role="status" aria-live="polite"></span></div>
           <div class="grid" id="episodeGrid"></div><div class="pager" id="episodePager"></div>
         </section>
 
@@ -210,7 +210,7 @@
             <div><h2 id="charactersTitle">Cast &amp; signature assets</h2></div>
             <div class="action-row"><label class="compact-field">View<select id="characterFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addCharacter" type="button">+ Character</button></div>
           </div>
-          <div class="list-controls"><label class="search-field" for="characterSearch">Search characters<input id="characterSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="character">Clear search</button><span id="characterResults" role="status" aria-live="polite"></span></div>
+          <div class="list-controls"><div class="search-control" data-search-control="character"><label class="sr" for="characterSearch">Search characters</label><div class="search-input-wrap"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.25 4.25"/></svg><input id="characterSearch" type="search" autocomplete="off" placeholder="Search characters" aria-describedby="characterResults"><button class="search-clear hidden" type="button" data-clear-search="character" aria-label="Clear character search"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div></div><span class="search-result-count" id="characterResults" role="status" aria-live="polite"></span></div>
           <div class="grid" id="characterGrid"></div><div class="pager" id="characterPager"></div>
         </section>
 
@@ -223,7 +223,7 @@
             <div><h2 id="promptsTitle">Prompt library</h2><p>Save reusable production instructions and copy them when needed.</p></div>
             <button class="btn primary" id="addPrompt" type="button">+ Prompt</button>
           </div>
-          <div class="list-controls"><label class="search-field" for="promptSearch">Search prompts<input id="promptSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="prompt">Clear search</button><span id="promptResults" role="status" aria-live="polite"></span></div>
+          <div class="list-controls"><div class="search-control" data-search-control="prompt"><label class="sr" for="promptSearch">Search prompts</label><div class="search-input-wrap"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.25 4.25"/></svg><input id="promptSearch" type="search" autocomplete="off" placeholder="Search prompts" aria-describedby="promptResults"><button class="search-clear hidden" type="button" data-clear-search="prompt" aria-label="Clear prompt search"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div></div><span class="search-result-count" id="promptResults" role="status" aria-live="polite"></span></div>
           <div class="grid" id="promptGrid"></div><div class="pager" id="promptPager"></div>
         </section>
 
@@ -249,7 +249,7 @@
 
         <section class="section" id="tools" aria-labelledby="toolsTitle">
           <div class="rowhead"><div><h2 id="toolsTitle">Production tools</h2><p>Your private tools plus admin tools assigned to you.</p></div><div class="action-row" id="toolAdminActions"><label class="compact-field" id="toolFilterWrap">View<select id="toolFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label><button class="btn primary" id="addTool" type="button">+ Add tool</button></div></div>
-          <div class="list-controls"><label class="search-field" for="toolSearch">Search tool catalog<input id="toolSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="tool">Clear search</button><span id="toolResults" role="status" aria-live="polite"></span></div>
+          <div class="list-controls"><div class="search-control" data-search-control="tool"><label class="sr" for="toolSearch">Search tool catalog</label><div class="search-input-wrap"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.25 4.25"/></svg><input id="toolSearch" type="search" autocomplete="off" placeholder="Search tool catalog" aria-describedby="toolResults"><button class="search-clear hidden" type="button" data-clear-search="tool" aria-label="Clear tool search"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div></div><span class="search-result-count" id="toolResults" role="status" aria-live="polite"></span></div>
           <div class="stack" id="toolGrid"></div><div class="pager" id="toolPager"></div>
           <div class="rowhead"><div><h2>Cost and rights</h2></div></div>
           <div class="notice">Cloud video credits and free exports can change. Keep clean masters and approved character references. Use music with rights for every platform where you publish.</div>
@@ -321,7 +321,7 @@
             <p class="form-status" id="adminSettingsStatus" role="status"></p>
           </form>
           <div class="rowhead"><div><h2>Users</h2><p>Disable or archive without losing data. Permanent deletion removes only the selected account workspace and uploads.</p></div><label class="compact-field">View<select id="userFilter"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></select></label></div>
-          <div class="list-controls"><label class="search-field" for="userSearch">Search users<input id="userSearch" type="search" autocomplete="off"></label><button class="btn" type="button" data-clear-search="user">Clear search</button><span id="userResults" role="status" aria-live="polite"></span></div>
+          <div class="list-controls"><div class="search-control" data-search-control="user"><label class="sr" for="userSearch">Search users</label><div class="search-input-wrap"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.25 4.25"/></svg><input id="userSearch" type="search" autocomplete="off" placeholder="Search users" aria-describedby="userResults"><button class="search-clear hidden" type="button" data-clear-search="user" aria-label="Clear user search"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div></div><span class="search-result-count" id="userResults" role="status" aria-live="polite"></span></div>
           <div class="user-list" id="userList"></div><div class="pager" id="userPager"></div>
         </section>
       </main>

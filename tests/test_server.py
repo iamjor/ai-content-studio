@@ -1037,7 +1037,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(session["authenticated"])
         self.assertFalse(session["registrationEnabled"])
-        self.assertEqual(session["version"], "0.4.1")
+        self.assertEqual(session["version"], "0.4.2")
 
     def test_02_admin_login_hashing_and_legacy_migration(self):
         """Hash the bootstrap password and assign legacy data to the initial admin."""
@@ -1045,7 +1045,7 @@ class ServerIntegrationTests(unittest.TestCase):
         status, payload, headers = admin.login(ADMIN_USERNAME, ADMIN_PASSWORD)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["user"]["role"], "admin")
-        self.assertEqual(payload["version"], "0.4.1")
+        self.assertEqual(payload["version"], "0.4.2")
         if payload["user"]["recoverySetupRequired"]:
             admin.complete_recovery_setup()
         set_cookie = headers.get("Set-Cookie", "")
@@ -3627,6 +3627,92 @@ class ServerIntegrationTests(unittest.TestCase):
         users = admin.request("/api/admin/users")[1]["users"]
         by_name = {item["username"]: item for item in users}
         self.assertFalse(by_name["online-multi"]["online"])
+
+
+    def test_27_heartbeat_and_presence_ui_contracts(self):
+        """Cover heartbeat auth, bounded writes, timers, search, and status UI."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        anonymous = TestClient(self.base_url)
+        self.assertEqual(anonymous.request(
+            "/api/heartbeat", method="POST", payload={}
+        )[0], 401)
+
+        user = TestClient(self.base_url)
+        self.assertEqual(user.register(
+            "heartbeat-user", "Heartbeat User", "heartbeat-user-password"
+        )[0], 201)
+        self.assertEqual(user.request(
+            "/api/heartbeat", method="POST", payload={}, include_csrf=False
+        )[0], 403)
+        user_id = user.request("/api/session")[1]["user"]["id"]
+        bounded_seen = int(time.time()) - 30
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                "UPDATE users SET last_seen_at=? WHERE id=?",
+                (bounded_seen, user_id),
+            )
+        heartbeat = user.request("/api/heartbeat", method="POST", payload={})
+        self.assertEqual(heartbeat[0], 200, heartbeat[1])
+        self.assertTrue(heartbeat[1]["ok"])
+        with sqlite3.connect(self.database_path) as database:
+            self.assertEqual(database.execute(
+                "SELECT last_seen_at FROM users WHERE id=?", (user_id,)
+            ).fetchone()[0], bounded_seen)
+            old_seen = int(time.time()) - 61
+            database.execute(
+                "UPDATE users SET last_seen_at=? WHERE id=?",
+                (old_seen, user_id),
+            )
+        self.assertEqual(user.request(
+            "/api/heartbeat", method="POST", payload={}
+        )[0], 200)
+        with sqlite3.connect(self.database_path) as database:
+            self.assertGreater(database.execute(
+                "SELECT last_seen_at FROM users WHERE id=?", (user_id,)
+            ).fetchone()[0], old_seen)
+
+        admin = self.admin_client()
+        current = next(item for item in admin.request(
+            "/api/admin/users"
+        )[1]["users"] if item["id"] == user_id)
+        self.assertTrue(current["online"])
+        self.assertEqual(user.request(
+            "/api/logout", method="POST", payload={}
+        )[0], 200)
+        current = next(item for item in admin.request(
+            "/api/admin/users"
+        )[1]["users"] if item["id"] == user_id)
+        self.assertFalse(current["online"])
+
+        html = admin.request("/")[1]
+        script = admin.request("/app.js")[1]
+        css = admin.request("/style.css")[1]
+        for kind in ("project", "episode", "character", "prompt", "tool", "user"):
+            self.assertIn(f'class="search-control" data-search-control="{kind}"', html)
+            self.assertIn(f'data-clear-search="{kind}"', html)
+            self.assertIn(f'placeholder="Search {"tool catalog" if kind == "tool" else kind + "s"}"', html)
+        self.assertGreaterEqual(html.count('class="search-icon"'), 6)
+        self.assertGreaterEqual(html.count('class="search-clear hidden"'), 6)
+        self.assertGreaterEqual(html.count("aria-label=\"Clear "), 6)
+        self.assertIn("HEARTBEAT_INTERVAL_MS", script)
+        self.assertIn("PRESENCE_REFRESH_INTERVAL_MS", script)
+        self.assertIn('api("/api/heartbeat"', script)
+        self.assertIn('document.addEventListener("visibilitychange"', script)
+        self.assertIn("document.hidden", script)
+        self.assertIn("window.clearInterval", script)
+        self.assertIn("syncAdminPresence", script)
+        self.assertIn('classList.toggle("hidden", !input.value)', script)
+        self.assertIn('class="presence-status presence-online"', script)
+        self.assertIn('class="presence-status presence-offline"', script)
+        self.assertIn('class="presence-dot" aria-hidden="true"', script)
+        self.assertIn(".search-control", css)
+        self.assertIn(".search-input-wrap", css)
+        self.assertIn(".search-clear", css)
+        self.assertGreaterEqual(css.count("--search-bg:"), 2)
+        self.assertIn("--presence-online:", css)
+        self.assertIn("--presence-offline:", css)
+        self.assertIn("html[data-theme=\"light\"]", css)
 
 
 class FollowupMigrationTests(unittest.TestCase):

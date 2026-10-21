@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-60a5fa.svg"></a>
-  <img alt="Version 0.4.1" src="https://img.shields.io/badge/version-0.4.1-60a5fa.svg">
+  <img alt="Version 0.4.2" src="https://img.shields.io/badge/version-0.4.2-60a5fa.svg">
   <img alt="Python 3.13" src="https://img.shields.io/badge/Python-3.13-3776AB.svg">
 </p>
 
@@ -77,6 +77,7 @@ The project does not provide email verification, password-reset email, MFA, or e
 
 - [Technical reference](docs/TECHNICAL.md)
 - [Deployment, migration, backup, and rollback](docs/DEPLOYMENT.md)
+- [Version 0.4.2 release notes](docs/RELEASE_NOTES_v0.4.2.md)
 - [Version 0.4.1 release notes](docs/RELEASE_NOTES_v0.4.1.md)
 - [Version 0.4.0 release notes](docs/RELEASE_NOTES_v0.4.0.md)
 - [Version 0.3.0 release notes](docs/RELEASE_NOTES_v0.3.0.md)
