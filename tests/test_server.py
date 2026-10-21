@@ -3712,6 +3712,13 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(css.count("--search-bg:"), 2)
         self.assertIn("--presence-online:", css)
         self.assertIn("--presence-offline:", css)
+        self.assertNotIn(".user-meta span", css)
+        self.assertGreaterEqual(css.count(".user-meta > span"), 2)
+        self.assertRegex(css, r"(?s)\.presence-status \{[^}]*display: inline-flex;[^}]*align-items: center;[^}]*gap: 7px;")
+        self.assertRegex(css, r"(?s)\.presence-online \{[^}]*color: var\(--presence-online\);")
+        self.assertRegex(css, r"(?s)\.presence-offline \{[^}]*color: var\(--presence-offline\);")
+        self.assertRegex(css, r"(?s)\.presence-dot \{[^}]*background: currentColor;")
+        self.assertIn(".activity-last-login { color: var(--muted); }", css)
         self.assertIn("html[data-theme=\"light\"]", css)
 
 
