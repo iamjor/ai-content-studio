@@ -26,6 +26,7 @@ AI Content Studio organizes project Bibles, episodes, shot plans, characters, lo
 - Administrator-assisted reset, no-email recovery codes, Contact page settings, per-user tool assignments, and granular MCP grants
 - Password hashing, server-side sessions, CSRF checks, and bounded authentication attempts
 - Responsive dark and light themes with accessible navigation
+- Compact searchable collections and automatically refreshed administrator presence
 - Text-only JSON workspace transfer and volume-level complete backup
 - Non-destructive migration from the legacy single-owner workspace
 
