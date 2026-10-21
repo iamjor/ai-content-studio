@@ -47,6 +47,8 @@ The first v0.4 start records schema version 6 and additively adds recovery-code 
 
 The v0.4.1 hotfix records schema version 7 through an additive migration. It adds nullable UTC last-login and last-seen fields and a nullable canonical tool-domain field, then populates identities without merging or deleting existing duplicates. Existing account IDs, tool IDs, owners, assignments, workspaces, recovery sets, attachments, MCP permissions, grants, tokens, sessions, and archive state remain in place. Upgrade by replacing the application image while preserving the existing volume. Take the normal complete backup before upgrade, then verify login, recovery setup, one-use recovery, attachment downloads, tool sharing and canonical linking, search pagination, administrator-only activity status, and MCP readiness.
 
+The v0.4.2 hotfix does not change the schema. It adds a browser heartbeat over the existing bounded last-seen update and automatic administrator presence polling only while Users is visible. It also replaces the six list search controls without changing stored records, permissions, filtering, or pagination. Preserve the existing volume and verify search controls in both themes, heartbeat authentication, visibility pause and resume, Online and Offline transitions, logout, session expiry, and MCP readiness.
+
 The v0.3 image installs the hash-locked official MCP SDK dependency set from `requirements.txt`; `requirements.in` records the direct SDK pin and starts a loopback-only MCP worker behind the existing public service. No external database, paid API, or production OAuth client is required.
 
 ## 4. Production rollout

@@ -22,6 +22,12 @@
   var assignmentSelection = new Set();
   var assignmentPage = 0;
   var notificationTimer = null;
+  var heartbeatTimer = null;
+  var presenceTimer = null;
+  var heartbeatInFlight = false;
+  var presenceInFlight = false;
+  var HEARTBEAT_INTERVAL_MS = 60 * 1000;
+  var PRESENCE_REFRESH_INTERVAL_MS = 30 * 1000;
   var statuses = [
     "Script draft", "60s script ready", "References approved",
     "Assets generated", "Editing", "Ready for review", "Approved", "Published"
@@ -97,6 +103,7 @@
   }
 
   function showSecuritySetup(payload, regeneration) {
+    stopPresenceActivity();
     session = payload;
     dismissBootstrap();
     byId("appView").classList.add("hidden");
@@ -183,6 +190,57 @@
       throw error;
     }
     return payload;
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) { window.clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  }
+
+  function stopAdminPresence() {
+    if (presenceTimer) { window.clearInterval(presenceTimer); presenceTimer = null; }
+  }
+
+  async function sendHeartbeat() {
+    if (!session || document.hidden || heartbeatInFlight) { return; }
+    heartbeatInFlight = true;
+    try { await api("/api/heartbeat", {method: "POST", body: {}}); }
+    catch (error) { if (error.status !== 401) { console.warn("Heartbeat failed."); } }
+    finally { heartbeatInFlight = false; }
+  }
+
+  function adminUsersVisible() {
+    return Boolean(session && session.user.role === "admin" && !document.hidden && byId("admin").classList.contains("active"));
+  }
+
+  async function refreshAdminPresence() {
+    if (!adminUsersVisible() || presenceInFlight) { return; }
+    presenceInFlight = true;
+    try {
+      var users = (await api("/api/admin/users")).users;
+      byId("userList").dataset.users = JSON.stringify(users);
+      renderUsers(users);
+    } catch (error) {
+      if (error.status !== 401) { setStatus(byId("adminSettingsStatus"), "Presence could not be refreshed: " + error.message, "error"); }
+    } finally { presenceInFlight = false; }
+  }
+
+  function syncHeartbeat(sendNow) {
+    stopHeartbeat();
+    if (!session || document.hidden) { return; }
+    if (sendNow) { sendHeartbeat(); }
+    heartbeatTimer = window.setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+  }
+
+  function syncAdminPresence(refreshNow) {
+    stopAdminPresence();
+    if (!adminUsersVisible()) { return; }
+    if (refreshNow) { refreshAdminPresence(); }
+    presenceTimer = window.setInterval(refreshAdminPresence, PRESENCE_REFRESH_INTERVAL_MS);
+  }
+
+  function stopPresenceActivity() {
+    stopHeartbeat();
+    stopAdminPresence();
   }
 
   function defaultProject() {
@@ -292,6 +350,7 @@
   }
 
   function showSignedOut(message) {
+    stopPresenceActivity();
     session = null;
     state = null;
     revision = 0;
@@ -377,6 +436,7 @@
     dismissBootstrap();
     byId("appView").classList.remove("hidden");
     goTo("overview", focusDestination);
+    syncHeartbeat(false);
   }
 
   function activeProject() {
@@ -430,6 +490,7 @@
     if (window.matchMedia("(max-width: 1080px)").matches) { setSidebar(false); }
     if (tab === "admin" && session.user.role === "admin") { loadAdmin(); }
     if (tab === "tools") { loadTools(); }
+    syncAdminPresence(false);
     render();
     if (focusDestination) {
       window.requestAnimationFrame(function () { focusSectionHeading(tab); });
@@ -638,7 +699,10 @@
     byId("userList").innerHTML = users.length ? users.map(function (user) {
       var permissions = user.mcpPermissions;
       var mcp = user.role === "admin" ? '<p class="muted">Administrators retain full MCP access.</p>' : '<fieldset class="permission-grid"><legend>MCP permissions</legend>' + ["enabled", "read", "write", "archive", "delete"].map(function (key) { return '<label><input type="checkbox" data-mcp="' + key + '"' + (permissions[key] ? " checked" : "") + '> ' + escapeHtml(key === "enabled" ? "Enabled" : key) + "</label>"; }).join("") + '<button class="btn" data-user-action="mcp" type="button">Save MCP permissions</button></fieldset>';
-      var activity = '<p class="activity-status"><strong>' + (user.online ? "Online" : "Offline") + '</strong><span>Last login: ' + (user.lastLoginAt ? new Date(user.lastLoginAt * 1000).toLocaleString() : "Never") + "</span></p>";
+      var presence = user.online
+        ? '<span class="presence-status presence-online"><span class="presence-dot" aria-hidden="true"></span>Online</span>'
+        : '<span class="presence-status presence-offline"><span class="presence-dot" aria-hidden="true"></span>Offline</span>';
+      var activity = '<p class="activity-status">' + presence + '<span class="activity-last-login">Last login: ' + (user.lastLoginAt ? new Date(user.lastLoginAt * 1000).toLocaleString() : "Never") + "</span></p>";
       return '<article class="user-row" data-user-row="' + user.id + '"><div class="user-meta"><strong>' + escapeHtml(user.displayName) + '</strong><span>@' + escapeHtml(user.username) + " · " + (user.archived ? "Archived" : user.active ? "Active" : "Disabled") + '</span>' + activity + '</div><label class="field">Role<select data-user-role><option value="user"' + (user.role === "user" ? " selected" : "") + '>User</option><option value="admin"' + (user.role === "admin" ? " selected" : "") + '>Admin</option></select></label>' + mcp + '<div class="card-actions"><button class="btn" data-user-action="role" type="button">Save role</button><button class="btn" data-user-action="reset" type="button">Reset password</button>' + (user.archived ? '<button class="btn" data-user-action="restore" type="button">Restore</button>' : (user.active ? '<button class="btn" data-user-action="disable" type="button">Disable</button><button class="btn" data-user-action="archive" type="button">Archive</button>' : '<button class="btn" data-user-action="restore" type="button">Restore</button><button class="btn" data-user-action="archive" type="button">Archive</button>')) + '<button class="btn danger" data-user-action="delete" type="button">Delete</button></div></article>';
     }).join("") : (page.query ? noResults("user term") : '<div class="card empty"><h3>No users in this view</h3></div>');
   }
@@ -750,6 +814,12 @@
     showSignedOut("");
   }
 
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) { stopPresenceActivity(); return; }
+    syncHeartbeat(true);
+    syncAdminPresence(true);
+  });
+
   byId("loginThemeToggle").addEventListener("click", toggleTheme);
   byId("themeToggle").addEventListener("click", toggleTheme);
   byId("showRegister").addEventListener("click", function () { renderAuthView("register", "registerName"); });
@@ -799,7 +869,13 @@
   byId("toolFilter").addEventListener("change", function () { listPages.tool = 0; renderTools(); });
   byId("userFilter").addEventListener("change", function () { listPages.user = 0; var users = JSON.parse(byId("userList").dataset.users || "[]"); renderUsers(users); });
   [{kind: "project", render: render}, {kind: "episode", render: render}, {kind: "character", render: render}, {kind: "prompt", render: render}, {kind: "tool", render: renderTools}, {kind: "user", render: function () { renderUsers(JSON.parse(byId("userList").dataset.users || "[]")); }}].forEach(function (list) {
-    byId(list.kind + "Search").addEventListener("input", function () { listPages[list.kind] = 0; list.render(); });
+    var input = byId(list.kind + "Search");
+    input.addEventListener("input", function () {
+      var clearButton = document.querySelector('[data-clear-search="' + list.kind + '"]');
+      clearButton.classList.toggle("hidden", !input.value);
+      listPages[list.kind] = 0;
+      list.render();
+    });
   });
   document.addEventListener("click", function (event) {
     var clear = event.target.closest("[data-clear-search]");

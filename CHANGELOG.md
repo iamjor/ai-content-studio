@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.2 - 2026-10-21
+
+- Replaced Projects, Episodes, Characters, Prompts, Tools, and Users search fields with one responsive, accessible light-blue search control for dark and light themes.
+- Added authenticated visible-page heartbeats with bounded last-seen writes and automatic administrator presence refresh while the Users section is visible.
+- Kept Online status dependent on an active, non-archived account, recent activity, and at least one unexpired browser session.
+- Preserved schema version 7 and all existing workspace, authentication, recovery, MCP, attachment, tool, and assignment data.
+
 ## 0.4.1 - 2026-10-20
 
 - Fixed login, registration, password recovery, and required security setup layout so one explicit authentication view is visible at a time on desktop and mobile.

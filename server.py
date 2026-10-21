@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 APP_NAME = "AI Content Studio"
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"
 ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT / "dist"
 DB_PATH = Path(os.environ.get("AICS_DB_PATH", "/data/studio.sqlite3"))
@@ -1537,6 +1537,11 @@ class Handler(BaseHTTPRequestHandler):
             if not session:
                 return None
             return self.admin_reset_password(path, session)
+        if path == "/api/heartbeat":
+            session = self.require_session(csrf=True)
+            if not session:
+                return None
+            return self.json_reply(200, {"ok": True})
         if path == "/api/logout":
             session = self.require_session(csrf=True, allow_setup=True)
             if not session:
