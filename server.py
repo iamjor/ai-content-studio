@@ -3415,13 +3415,26 @@ class Handler(BaseHTTPRequestHandler):
         return self.json_reply(200, {"ok": True, "user": public_user(user)})
 
     def get_users(self):
-        """List public account metadata for basic administrator management."""
+        """List administrator-visible accounts with bounded session presence."""
+        now = int(time.time())
         with connect() as database:
             rows = database.execute(
                 """
-                SELECT * FROM users
-                ORDER BY created_at, id
-                """
+                SELECT u.*,
+                    EXISTS(
+                        SELECT 1 FROM sessions s
+                        WHERE s.user_id=u.id AND s.expires_at>?
+                    ) AS has_live_session,
+                    p.enabled AS mcp_enabled,
+                    p.can_read AS mcp_read,
+                    p.can_write AS mcp_write,
+                    p.can_archive AS mcp_archive,
+                    p.can_delete AS mcp_delete
+                FROM users u
+                LEFT JOIN mcp_permissions p ON p.user_id=u.id
+                ORDER BY u.created_at, u.id
+                """,
+                (now,),
             ).fetchall()
         users = []
         for row in rows:
@@ -3430,11 +3443,25 @@ class Handler(BaseHTTPRequestHandler):
             item["lastLoginAt"] = row["last_login_at"]
             item["lastSeenAt"] = row["last_seen_at"]
             item["online"] = bool(
-                row["last_seen_at"] is not None
-                and row["last_seen_at"] >= int(time.time()) - ONLINE_WINDOW_SECONDS
+                row["is_active"]
+                and row["archived_at"] is None
+                and row["last_seen_at"] is not None
+                and row["last_seen_at"] >= now - ONLINE_WINDOW_SECONDS
+                and row["has_live_session"]
             )
-            with connect() as permission_database:
-                item["mcpPermissions"] = mcp_permissions(permission_database, row["id"], row["role"])
+            if row["role"] == "admin":
+                item["mcpPermissions"] = {
+                    "enabled": True, "read": True, "write": True,
+                    "archive": True, "delete": True,
+                }
+            else:
+                item["mcpPermissions"] = {
+                    "enabled": bool(row["mcp_enabled"]),
+                    "read": bool(row["mcp_read"]),
+                    "write": bool(row["mcp_write"]),
+                    "archive": bool(row["mcp_archive"]),
+                    "delete": bool(row["mcp_delete"]),
+                }
             users.append(item)
         return self.json_reply(200, {"users": users})
 
@@ -3826,7 +3853,17 @@ class Handler(BaseHTTPRequestHandler):
                 )
             else:
                 return self.json_reply(400, {"error": "Choose a valid tool action."})
-            updated = database.execute("SELECT tools.*, 0 AS assigned FROM tools WHERE id=?", (tool_id,)).fetchone()
+            updated = database.execute(
+                """
+                SELECT tools.*, 0 AS assigned, COALESCE((
+                    SELECT GROUP_CONCAT(a.user_id)
+                    FROM tool_assignments a
+                    WHERE a.tool_id=tools.id
+                ), '') AS assigned_user_ids
+                FROM tools WHERE id=?
+                """,
+                (tool_id,),
+            ).fetchone()
         return self.json_reply(200, {"tool": self.serialize_tool(updated, session)})
 
     def delete_tool(self, path, session):

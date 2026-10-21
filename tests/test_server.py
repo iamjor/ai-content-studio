@@ -3469,6 +3469,10 @@ class ServerIntegrationTests(unittest.TestCase):
             payload={"action": "assign", "userIds": [recipient_id, other_id]},
         )
         self.assertEqual(assigned[0], 200, assigned[1])
+        self.assertEqual(
+            set(assigned[1]["tool"]["assignedUserIds"]),
+            {recipient_id, other_id},
+        )
         rejected_assignment = admin.request(
             f"/api/admin/tools/{tool_id}", method="PUT",
             payload={"action": "assign", "userIds": [owner_id]},
@@ -3483,8 +3487,16 @@ class ServerIntegrationTests(unittest.TestCase):
             payload={"action": "assign", "userIds": [other_id]},
         )
         self.assertEqual(unassigned[0], 200, unassigned[1])
+        self.assertEqual(unassigned[1]["tool"]["assignedUserIds"], [other_id])
         self.assertNotIn(tool_id, [item["id"] for item in recipient.request("/api/tools")[1]["tools"]])
         self.assertIn(tool_id, [item["id"] for item in other.request("/api/tools")[1]["tools"]])
+        cleared = admin.request(
+            f"/api/admin/tools/{tool_id}", method="PUT",
+            payload={"action": "assign", "userIds": []},
+        )
+        self.assertEqual(cleared[0], 200, cleared[1])
+        self.assertEqual(cleared[1]["tool"]["assignedUserIds"], [])
+        self.assertNotIn(tool_id, [item["id"] for item in other.request("/api/tools")[1]["tools"]])
 
         admin_tool = admin.request("/api/admin/tools", method="POST", payload={
             "name": "Canonical Admin", "category": "Planning",
@@ -3542,6 +3554,79 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn("MCP permissions were not saved", script)
         self.assertIn("No results match", script)
         self.assertIn("toLocaleString", script)
+
+    def test_26_online_status_requires_eligible_account_and_live_session(self):
+        """Require account eligibility, recent activity, and one live session."""
+        self.reset_regular_users()
+        self.set_registration(True)
+        admin = self.admin_client()
+
+        primary = TestClient(self.base_url)
+        self.assertEqual(primary.register(
+            "online-multi", "Online Multi", "online-multi-password"
+        )[0], 201)
+        secondary = TestClient(self.base_url)
+        self.assertEqual(secondary.login(
+            "online-multi", "online-multi-password"
+        )[0], 200)
+
+        expired = TestClient(self.base_url)
+        self.assertEqual(expired.register(
+            "online-expired", "Online Expired", "online-expired-password"
+        )[0], 201)
+        disabled = TestClient(self.base_url)
+        self.assertEqual(disabled.register(
+            "online-disabled", "Online Disabled", "online-disabled-password"
+        )[0], 201)
+        archived = TestClient(self.base_url)
+        self.assertEqual(archived.register(
+            "online-archived", "Online Archived", "online-archived-password"
+        )[0], 201)
+
+        users = admin.request("/api/admin/users")[1]["users"]
+        by_name = {item["username"]: item for item in users}
+        self.assertTrue(by_name["online-multi"]["online"])
+        expired_id = by_name["online-expired"]["id"]
+        disabled_id = by_name["online-disabled"]["id"]
+        archived_id = by_name["online-archived"]["id"]
+
+        with sqlite3.connect(self.database_path) as database:
+            database.execute(
+                "UPDATE users SET last_seen_at=? WHERE id=?",
+                (int(time.time()), expired_id),
+            )
+            database.execute(
+                "UPDATE sessions SET expires_at=? WHERE user_id=?",
+                (int(time.time()) - 1, expired_id),
+            )
+        self.assertEqual(admin.request(
+            f"/api/admin/users/{disabled_id}", method="PUT",
+            payload={"action": "disable"},
+        )[0], 200)
+        self.assertEqual(admin.request(
+            f"/api/admin/users/{archived_id}", method="PUT",
+            payload={"action": "archive"},
+        )[0], 200)
+
+        users = admin.request("/api/admin/users")[1]["users"]
+        by_name = {item["username"]: item for item in users}
+        self.assertFalse(by_name["online-expired"]["online"])
+        self.assertFalse(by_name["online-disabled"]["online"])
+        self.assertFalse(by_name["online-archived"]["online"])
+
+        self.assertEqual(primary.request(
+            "/api/logout", method="POST", payload={}
+        )[0], 200)
+        users = admin.request("/api/admin/users")[1]["users"]
+        by_name = {item["username"]: item for item in users}
+        self.assertTrue(by_name["online-multi"]["online"])
+
+        self.assertEqual(secondary.request(
+            "/api/logout", method="POST", payload={}
+        )[0], 200)
+        users = admin.request("/api/admin/users")[1]["users"]
+        by_name = {item["username"]: item for item in users}
+        self.assertFalse(by_name["online-multi"]["online"])
 
 
 class FollowupMigrationTests(unittest.TestCase):
