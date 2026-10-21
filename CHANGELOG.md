@@ -6,6 +6,7 @@
 
 - Replaced Projects, Episodes, Characters, Prompts, Tools, and Users search fields with one responsive, accessible light-blue search control for dark and light themes.
 - Added authenticated visible-page heartbeats with bounded last-seen writes and automatic administrator presence refresh while the Users section is visible.
+- Styled Online with light-green text and indicator, Offline with red text and indicator, and kept each dot aligned beside its visible label.
 - Kept Online status dependent on an active, non-archived account, recent activity, and at least one unexpired browser session.
 - Preserved schema version 7 and all existing workspace, authentication, recovery, MCP, attachment, tool, and assignment data.
 
